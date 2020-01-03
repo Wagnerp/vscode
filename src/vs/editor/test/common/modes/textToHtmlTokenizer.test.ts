@@ -2,86 +2,311 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import assert = require('assert');
-import {tokenizeToHtmlContent} from 'vs/editor/common/modes/textToHtmlTokenizer';
-import {AbstractState} from 'vs/editor/common/modes/abstractState';
-import modes = require('vs/editor/common/modes');
-import supports = require('vs/editor/common/modes/supports');
+import * as assert from 'assert';
+import { TokenizationResult2 } from 'vs/editor/common/core/token';
+import { ColorId, FontStyle, IState, LanguageIdentifier, MetadataConsts, TokenizationRegistry } from 'vs/editor/common/modes';
+import { tokenizeLineToHTML, tokenizeToString } from 'vs/editor/common/modes/textToHtmlTokenizer';
+import { ViewLineToken, ViewLineTokens } from 'vs/editor/test/common/core/viewLineToken';
+import { MockMode } from 'vs/editor/test/common/mocks/mockMode';
 
 suite('Editor Modes - textToHtmlTokenizer', () => {
-	test('TextToHtmlTokenizer', () => {
-		var mode = new Mode();
-		var result = tokenizeToHtmlContent('.abc..def...gh', mode);
+	function toStr(pieces: { className: string; text: string }[]): string {
+		let resultArr = pieces.map((t) => `<span class="${t.className}">${t.text}</span>`);
+		return resultArr.join('');
+	}
 
-		assert.ok(!!result);
+	test('TextToHtmlTokenizer 1', () => {
+		let mode = new Mode();
+		let support = TokenizationRegistry.get(mode.getId())!;
 
-		var children = result.children;
-		assert.equal(children.length, 6);
+		let actual = tokenizeToString('.abc..def...gh', support);
+		let expected = [
+			{ className: 'mtk7', text: '.' },
+			{ className: 'mtk9', text: 'abc' },
+			{ className: 'mtk7', text: '..' },
+			{ className: 'mtk9', text: 'def' },
+			{ className: 'mtk7', text: '...' },
+			{ className: 'mtk9', text: 'gh' },
+		];
+		let expectedStr = `<div class="monaco-tokenized-source">${toStr(expected)}</div>`;
 
-		assert.equal(children[0].text, '.');
-		assert.equal(children[0].className, 'token');
-		assert.equal(children[0].tagName, 'span');
+		assert.equal(actual, expectedStr);
 
-		assert.equal(children[1].text, 'abc');
-		assert.equal(children[1].className, 'token text');
-		assert.equal(children[1].tagName, 'span');
+		mode.dispose();
+	});
 
-		assert.equal(children[2].text, '..');
-		assert.equal(children[2].className, 'token');
-		assert.equal(children[2].tagName, 'span');
+	test('TextToHtmlTokenizer 2', () => {
+		let mode = new Mode();
+		let support = TokenizationRegistry.get(mode.getId())!;
 
-		assert.equal(children[3].text, 'def');
-		assert.equal(children[3].className, 'token text');
-		assert.equal(children[3].tagName, 'span');
+		let actual = tokenizeToString('.abc..def...gh\n.abc..def...gh', support);
+		let expected1 = [
+			{ className: 'mtk7', text: '.' },
+			{ className: 'mtk9', text: 'abc' },
+			{ className: 'mtk7', text: '..' },
+			{ className: 'mtk9', text: 'def' },
+			{ className: 'mtk7', text: '...' },
+			{ className: 'mtk9', text: 'gh' },
+		];
+		let expected2 = [
+			{ className: 'mtk7', text: '.' },
+			{ className: 'mtk9', text: 'abc' },
+			{ className: 'mtk7', text: '..' },
+			{ className: 'mtk9', text: 'def' },
+			{ className: 'mtk7', text: '...' },
+			{ className: 'mtk9', text: 'gh' },
+		];
+		let expectedStr1 = toStr(expected1);
+		let expectedStr2 = toStr(expected2);
+		let expectedStr = `<div class="monaco-tokenized-source">${expectedStr1}<br/>${expectedStr2}</div>`;
 
-		assert.equal(children[4].text, '...');
-		assert.equal(children[4].className, 'token');
-		assert.equal(children[4].tagName, 'span');
+		assert.equal(actual, expectedStr);
 
-		assert.equal(children[5].text, 'gh');
-		assert.equal(children[5].className, 'token text');
-		assert.equal(children[5].tagName, 'span');
+		mode.dispose();
+	});
 
-		result = tokenizeToHtmlContent('.abc..def...gh\n.abc..def...gh', mode);
+	test('tokenizeLineToHTML', () => {
+		const text = 'Ciao hello world!';
+		const lineTokens = new ViewLineTokens([
+			new ViewLineToken(
+				4,
+				(
+					(3 << MetadataConsts.FOREGROUND_OFFSET)
+					| ((FontStyle.Bold | FontStyle.Italic) << MetadataConsts.FONT_STYLE_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				5,
+				(
+					(1 << MetadataConsts.FOREGROUND_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				10,
+				(
+					(4 << MetadataConsts.FOREGROUND_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				11,
+				(
+					(1 << MetadataConsts.FOREGROUND_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				17,
+				(
+					(5 << MetadataConsts.FOREGROUND_OFFSET)
+					| ((FontStyle.Underline) << MetadataConsts.FONT_STYLE_OFFSET)
+				) >>> 0
+			)
+		]);
+		const colorMap = [null!, '#000000', '#ffffff', '#ff0000', '#00ff00', '#0000ff'];
 
-		assert.ok(!!result);
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 0, 17, 4, true),
+			[
+				'<div>',
+				'<span style="color: #ff0000;font-style: italic;font-weight: bold;">Ciao</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #0000ff;text-decoration: underline;">world!</span>',
+				'</div>'
+			].join('')
+		);
 
-		children = result.children;
-		assert.equal(children.length, 12 + 1 /* +1 for the line break */);
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 0, 12, 4, true),
+			[
+				'<div>',
+				'<span style="color: #ff0000;font-style: italic;font-weight: bold;">Ciao</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #0000ff;text-decoration: underline;">w</span>',
+				'</div>'
+			].join('')
+		);
 
-		assert.equal(children[6].tagName, 'br');
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 0, 11, 4, true),
+			[
+				'<div>',
+				'<span style="color: #ff0000;font-style: italic;font-weight: bold;">Ciao</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'</div>'
+			].join('')
+		);
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 1, 11, 4, true),
+			[
+				'<div>',
+				'<span style="color: #ff0000;font-style: italic;font-weight: bold;">iao</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'</div>'
+			].join('')
+		);
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 4, 11, 4, true),
+			[
+				'<div>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'</div>'
+			].join('')
+		);
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 5, 11, 4, true),
+			[
+				'<div>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'</div>'
+			].join('')
+		);
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 5, 10, 4, true),
+			[
+				'<div>',
+				'<span style="color: #00ff00;">hello</span>',
+				'</div>'
+			].join('')
+		);
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 6, 9, 4, true),
+			[
+				'<div>',
+				'<span style="color: #00ff00;">ell</span>',
+				'</div>'
+			].join('')
+		);
+	});
+	test('tokenizeLineToHTML handle spaces #35954', () => {
+		const text = '  Ciao   hello world!';
+		const lineTokens = new ViewLineTokens([
+			new ViewLineToken(
+				2,
+				(
+					(1 << MetadataConsts.FOREGROUND_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				6,
+				(
+					(3 << MetadataConsts.FOREGROUND_OFFSET)
+					| ((FontStyle.Bold | FontStyle.Italic) << MetadataConsts.FONT_STYLE_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				9,
+				(
+					(1 << MetadataConsts.FOREGROUND_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				14,
+				(
+					(4 << MetadataConsts.FOREGROUND_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				15,
+				(
+					(1 << MetadataConsts.FOREGROUND_OFFSET)
+				) >>> 0
+			),
+			new ViewLineToken(
+				21,
+				(
+					(5 << MetadataConsts.FOREGROUND_OFFSET)
+					| ((FontStyle.Underline) << MetadataConsts.FONT_STYLE_OFFSET)
+				) >>> 0
+			)
+		]);
+		const colorMap = [null!, '#000000', '#ffffff', '#ff0000', '#00ff00', '#0000ff'];
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 0, 21, 4, true),
+			[
+				'<div>',
+				'<span style="color: #000000;">&#160;&#160;</span>',
+				'<span style="color: #ff0000;font-style: italic;font-weight: bold;">Ciao</span>',
+				'<span style="color: #000000;">&#160;&#160;&#160;</span>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #0000ff;text-decoration: underline;">world!</span>',
+				'</div>'
+			].join('')
+		);
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 0, 17, 4, true),
+			[
+				'<div>',
+				'<span style="color: #000000;">&#160;&#160;</span>',
+				'<span style="color: #ff0000;font-style: italic;font-weight: bold;">Ciao</span>',
+				'<span style="color: #000000;">&#160;&#160;&#160;</span>',
+				'<span style="color: #00ff00;">hello</span>',
+				'<span style="color: #000000;">&#160;</span>',
+				'<span style="color: #0000ff;text-decoration: underline;">wo</span>',
+				'</div>'
+			].join('')
+		);
+
+		assert.equal(
+			tokenizeLineToHTML(text, lineTokens, colorMap, 0, 3, 4, true),
+			[
+				'<div>',
+				'<span style="color: #000000;">&#160;&#160;</span>',
+				'<span style="color: #ff0000;font-style: italic;font-weight: bold;">C</span>',
+				'</div>'
+			].join('')
+		);
 	});
 
 });
 
-class State extends AbstractState {
+class Mode extends MockMode {
 
-	constructor(mode:modes.IMode) {
-		super(mode);
-	}
-
-	public makeClone() : AbstractState {
-		return new State(this.getMode());
-	}
-
-	public tokenize(stream:modes.IStream):modes.ITokenizationResult {
-		return { type: stream.next() === '.' ? '' : 'text' };
-	}
-}
-
-class Mode implements modes.IMode {
-
-	public tokenizationSupport: modes.ITokenizationSupport;
+	private static readonly _id = new LanguageIdentifier('textToHtmlTokenizerMode', 3);
 
 	constructor() {
-		this.tokenizationSupport = new supports.TokenizationSupport(this, {
-			getInitialState: () => new State(this)
-		}, false, false);
-	}
+		super(Mode._id);
+		this._register(TokenizationRegistry.register(this.getId(), {
+			getInitialState: (): IState => null!,
+			tokenize: undefined!,
+			tokenize2: (line: string, state: IState): TokenizationResult2 => {
+				let tokensArr: number[] = [];
+				let prevColor: ColorId = -1;
+				for (let i = 0; i < line.length; i++) {
+					let colorId = line.charAt(i) === '.' ? 7 : 9;
+					if (prevColor !== colorId) {
+						tokensArr.push(i);
+						tokensArr.push((
+							colorId << MetadataConsts.FOREGROUND_OFFSET
+						) >>> 0);
+					}
+					prevColor = colorId;
+				}
 
-	public getId(): string {
-		return "testMode";
+				let tokens = new Uint32Array(tokensArr.length);
+				for (let i = 0; i < tokens.length; i++) {
+					tokens[i] = tokensArr[i];
+				}
+				return new TokenizationResult2(tokens, null!);
+			}
+		}));
 	}
 }

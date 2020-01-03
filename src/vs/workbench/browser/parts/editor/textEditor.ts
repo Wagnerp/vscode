@@ -3,251 +3,308 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
+import { localize } from 'vs/nls';
+import { URI } from 'vs/base/common/uri';
+import { distinct, deepClone, assign } from 'vs/base/common/objects';
+import { isObject, assertIsDefined, withNullAsUndefined, isFunction } from 'vs/base/common/types';
+import { Dimension } from 'vs/base/browser/dom';
+import { CodeEditorWidget } from 'vs/editor/browser/widget/codeEditorWidget';
+import { EditorInput, EditorOptions, IEditorMemento, ITextEditor, TextEditorOptions } from 'vs/workbench/common/editor';
+import { BaseEditor } from 'vs/workbench/browser/parts/editor/baseEditor';
+import { IEditorViewState, IEditor, ScrollType } from 'vs/editor/common/editorCommon';
+import { IStorageService } from 'vs/platform/storage/common/storage';
+import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
+import { IThemeService } from 'vs/platform/theme/common/themeService';
+import { ITextResourceConfigurationService } from 'vs/editor/common/services/textResourceConfigurationService';
+import { IEditorOptions } from 'vs/editor/common/config/editorOptions';
+import { isCodeEditor, getCodeEditor } from 'vs/editor/browser/editorBrowser';
+import { IEditorGroupsService, IEditorGroup } from 'vs/workbench/services/editor/common/editorGroupsService';
+import { CancellationToken } from 'vs/base/common/cancellation';
+import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 
-import 'vs/css!./media/texteditor';
-import {TPromise} from 'vs/base/common/winjs.base';
-import {Dimension, Builder} from 'vs/base/browser/builder';
-import objects = require('vs/base/common/objects');
-import errors = require('vs/base/common/errors');
-import {CodeEditorWidget} from 'vs/editor/browser/widget/codeEditorWidget';
-import {Preferences} from 'vs/workbench/common/constants';
-import {IEditorViewState} from 'vs/editor/common/editorCommon';
-import {EventType as WorkbenchEventType, EditorEvent, TextEditorSelectionEvent, OptionsChangeEvent} from 'vs/workbench/browser/events';
-import {Scope} from 'vs/workbench/common/memento';
-import {BaseEditor} from 'vs/workbench/browser/parts/editor/baseEditor';
-import {EditorConfiguration} from 'vs/editor/common/config/commonEditorConfig';
-import {IEditorSelection, IEditor, EventType, IConfigurationChangedEvent, IModelContentChangedEvent, IModelModeChangedEvent, ICursorPositionChangedEvent, IEditorOptions} from 'vs/editor/common/editorCommon';
-import {IWorkspaceContextService} from 'vs/workbench/services/workspace/common/contextService';
-import {IFilesConfiguration} from 'vs/platform/files/common/files';
-import {Position} from 'vs/platform/editor/common/editor';
-import {DEFAULT_THEME_ID} from 'vs/platform/theme/common/themes';
-import {IStorageService, StorageScope, StorageEvent, StorageEventType} from 'vs/platform/storage/common/storage';
-import {IConfigurationService, IConfigurationServiceEvent, ConfigurationServiceEventTypes} from 'vs/platform/configuration/common/configuration';
-import {IEventService} from 'vs/platform/event/common/event';
-import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
-import {IMessageService} from 'vs/platform/message/common/message';
-import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
-import {IWorkbenchEditorService} from 'vs/workbench/services/editor/common/editorService';
-import {IModeService} from 'vs/editor/common/services/modeService';
-
-const EDITOR_VIEW_STATE_PREFERENCE_KEY = 'editorViewState';
+export interface IEditorConfiguration {
+	editor: object;
+	diffEditor: object;
+}
 
 /**
- * The base class of editors that leverage the monaco text editor for the editing experience. This class is only intended to
+ * The base class of editors that leverage the text editor for the editing experience. This class is only intended to
  * be subclassed and not instantiated.
  */
-export abstract class BaseTextEditor extends BaseEditor {
-	private editorControl: IEditor;
-	private _editorContainer: Builder;
+export abstract class BaseTextEditor extends BaseEditor implements ITextEditor {
+
+	static readonly TEXT_EDITOR_VIEW_STATE_PREFERENCE_KEY = 'textEditorViewState';
+
+	private editorControl: IEditor | undefined;
+	private editorContainer: HTMLElement | undefined;
+	private hasPendingConfigurationChange: boolean | undefined;
+	private lastAppliedEditorOptions?: IEditorOptions;
+	private editorMemento: IEditorMemento<IEditorViewState>;
 
 	constructor(
 		id: string,
 		@ITelemetryService telemetryService: ITelemetryService,
-		@IInstantiationService private _instantiationService: IInstantiationService,
-		@IWorkspaceContextService private _contextService: IWorkspaceContextService,
-		@IStorageService private _storageService: IStorageService,
-		@IMessageService private _messageService: IMessageService,
-		@IConfigurationService private configurationService: IConfigurationService,
-		@IEventService private _eventService: IEventService,
-		@IWorkbenchEditorService private _editorService: IWorkbenchEditorService,
-		@IModeService private _modeService: IModeService
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@IStorageService storageService: IStorageService,
+		@ITextResourceConfigurationService private readonly _configurationService: ITextResourceConfigurationService,
+		@IThemeService protected themeService: IThemeService,
+		@IEditorService protected editorService: IEditorService,
+		@IEditorGroupsService protected editorGroupService: IEditorGroupsService
 	) {
-		super(id, telemetryService);
+		super(id, telemetryService, themeService, storageService);
 
-		this.toUnbind.push(this._eventService.addListener(StorageEventType.STORAGE, (e: StorageEvent) => this.onPreferencesChanged(e)));
-		this.toUnbind.push(this._eventService.addListener(WorkbenchEventType.WORKBENCH_OPTIONS_CHANGED, (e) => this.onOptionsChanged(e)));
-		this.toUnbind.push(this.configurationService.addListener(ConfigurationServiceEventTypes.UPDATED, (e: IConfigurationServiceEvent) => this.applyConfiguration(e.config)));
+		this.editorMemento = this.getEditorMemento<IEditorViewState>(editorGroupService, BaseTextEditor.TEXT_EDITOR_VIEW_STATE_PREFERENCE_KEY, 100);
+
+		this._register(this.configurationService.onDidChangeConfiguration(e => {
+			const resource = this.getResource();
+			const value = resource ? this.configurationService.getValue<IEditorConfiguration>(resource) : undefined;
+			return this.handleConfigurationChangeEvent(value);
+		}));
 	}
 
-	public get instantiationService(): IInstantiationService {
+	protected get instantiationService(): IInstantiationService {
 		return this._instantiationService;
 	}
 
-	public get contextService(): IWorkspaceContextService {
-		return this._contextService;
+	protected get configurationService(): ITextResourceConfigurationService {
+		return this._configurationService;
 	}
 
-	public get storageService(): IStorageService {
-		return this._storageService;
-	}
-
-	public get messageService() {
-		return this._messageService;
-	}
-
-	protected applyConfiguration(configuration: IFilesConfiguration): void {
-
-		// Update Editor with configuration and editor settings
-		if (this.editorControl) {
-			let specificEditorSettings = this.getCodeEditorOptions();
-			configuration = objects.clone(configuration); // dont modify original config
-			objects.assign(configuration[EditorConfiguration.EDITOR_SECTION], specificEditorSettings);
-
-			EditorConfiguration.apply(configuration, this.editorControl);
-		}
-
-		// Update Languages
-		this._modeService.configureAllModes(configuration);
-	}
-
-	private onOptionsChanged(event: OptionsChangeEvent): void {
-		if (this.editorControl) {
-			this.editorControl.updateOptions(this.getCodeEditorOptions());
+	protected handleConfigurationChangeEvent(configuration?: IEditorConfiguration): void {
+		if (this.isVisible()) {
+			this.updateEditorConfiguration(configuration);
+		} else {
+			this.hasPendingConfigurationChange = true;
 		}
 	}
 
-	private onPreferencesChanged(e: StorageEvent): void {
-
-		// Update Theme in Editor Control
-		if (e.key === Preferences.THEME) {
-			this.editorControl.updateOptions(this.getCodeEditorOptions());
+	private consumePendingConfigurationChangeEvent(): void {
+		if (this.hasPendingConfigurationChange) {
+			this.updateEditorConfiguration();
+			this.hasPendingConfigurationChange = false;
 		}
 	}
 
-	protected getCodeEditorOptions(): IEditorOptions {
-		let baseOptions: IEditorOptions = {
+	protected computeConfiguration(configuration: IEditorConfiguration): IEditorOptions {
+
+		// Specific editor options always overwrite user configuration
+		const editorConfiguration: IEditorOptions = isObject(configuration.editor) ? deepClone(configuration.editor) : Object.create(null);
+		assign(editorConfiguration, this.getConfigurationOverrides());
+
+		// ARIA label
+		editorConfiguration.ariaLabel = this.computeAriaLabel();
+
+		return editorConfiguration;
+	}
+
+	private computeAriaLabel(): string {
+		let ariaLabel = this.getAriaLabel();
+
+		// Apply group information to help identify in which group we are
+		if (ariaLabel) {
+			if (this.group) {
+				ariaLabel = localize('editorLabelWithGroup', "{0}, {1}.", ariaLabel, this.group.label);
+			}
+		}
+
+		return ariaLabel;
+	}
+
+	protected getConfigurationOverrides(): IEditorOptions {
+		return {
 			overviewRulerLanes: 3,
-			readOnly: this.contextService.getOptions().readOnly,
-			glyphMargin: true,
 			lineNumbersMinChars: 3,
-			theme: this._storageService.get(Preferences.THEME, StorageScope.GLOBAL, DEFAULT_THEME_ID)
+			fixedOverflowWidgets: true,
+			readOnly: this.input?.isReadonly()
 		};
-
-		// Always mixin editor options from the context into our set to allow for override
-		return objects.mixin(baseOptions, this.contextService.getOptions().editor);
 	}
 
-	public get eventService(): IEventService {
-		return this._eventService;
-	}
-
-	public get editorService() {
-		return this._editorService;
-	}
-
-	public get editorContainer(): Builder {
-		return this._editorContainer;
-	}
-
-	public createEditor(parent: Builder): void {
+	protected createEditor(parent: HTMLElement): void {
 
 		// Editor for Text
-		this._editorContainer = parent;
-		this.editorControl = this.createEditorControl(parent);
+		this.editorContainer = parent;
+		this.editorControl = this._register(this.createEditorControl(parent, this.computeConfiguration(this.configurationService.getValue<IEditorConfiguration>(this.getResource()))));
 
-		// Hook Listener for Selection changes (and only react to api, mouse or keyboard source, not any internal source of the editor)
-		this.toUnbind.push(this.editorControl.addListener(EventType.CursorPositionChanged, (event: ICursorPositionChangedEvent) => {
-			if (event.source === 'api' || event.source === 'mouse' || event.source === 'keyboard') {
-				let selection = this.editorControl.getSelection();
-				this.eventService.emit(WorkbenchEventType.TEXT_EDITOR_SELECTION_CHANGED, new TextEditorSelectionEvent(selection, this, this.getId(), this.input, null, this.position, event));
-			}
-		}));
-
-		// Hook Listener for mode changes
-		this.toUnbind.push(this.editorControl.addListener(EventType.ModelModeChanged, (event: IModelModeChangedEvent) => {
-			this.eventService.emit(WorkbenchEventType.TEXT_EDITOR_MODE_CHANGED, new EditorEvent(this, this.getId(), this.input, null, this.position, event));
-		}));
-
-		// Hook Listener for content changes
-		this.toUnbind.push(this.editorControl.addListener(EventType.ModelContentChanged, (event: IModelContentChangedEvent) => {
-			this.eventService.emit(WorkbenchEventType.TEXT_EDITOR_CONTENT_CHANGED, new EditorEvent(this, this.getId(), this.input, null, this.position, event));
-		}));
-
-		// Hook Listener for options changes
-		this.toUnbind.push(this.editorControl.addListener(EventType.ConfigurationChanged, (event: IConfigurationChangedEvent) => {
-			this.eventService.emit(WorkbenchEventType.TEXT_EDITOR_CONFIGURATION_CHANGED, new EditorEvent(this, this.getId(), this.input, null, this.position, event));
-		}));
-
-		// Configuration
-		this.configurationService.loadConfiguration().then((config) => {
-			this.applyConfiguration(config);
-		}, errors.onUnexpectedError);
+		// Model & Language changes
+		const codeEditor = getCodeEditor(this.editorControl);
+		if (codeEditor) {
+			this._register(codeEditor.onDidChangeModelLanguage(() => this.updateEditorConfiguration()));
+			this._register(codeEditor.onDidChangeModel(() => this.updateEditorConfiguration()));
+		}
 	}
 
 	/**
 	 * This method creates and returns the text editor control to be used. Subclasses can override to
 	 * provide their own editor control that should be used (e.g. a DiffEditor).
+	 *
+	 * The passed in configuration object should be passed to the editor control when creating it.
 	 */
-	public createEditorControl(parent: Builder): IEditor {
-		return this._instantiationService.createInstance(CodeEditorWidget, parent.getHTMLElement(), this.getCodeEditorOptions());
+	protected createEditorControl(parent: HTMLElement, configuration: IEditorOptions): IEditor {
+
+		// Use a getter for the instantiation service since some subclasses might use scoped instantiation services
+		return this.instantiationService.createInstance(CodeEditorWidget, parent, configuration, {});
 	}
 
-	public setVisible(visible: boolean, position: Position = null): TPromise<void> {
-		let promise = super.setVisible(visible, position);
+	async setInput(input: EditorInput, options: EditorOptions | undefined, token: CancellationToken): Promise<void> {
+		await super.setInput(input, options, token);
+
+		// Update editor options after having set the input. We do this because there can be
+		// editor input specific options (e.g. an ARIA label depending on the input showing)
+		this.updateEditorConfiguration();
+
+		const editorContainer = assertIsDefined(this.editorContainer);
+		editorContainer.setAttribute('aria-label', this.computeAriaLabel());
+	}
+
+	setOptions(options: EditorOptions | undefined): void {
+		const textOptions = options as TextEditorOptions;
+		if (textOptions && isFunction(textOptions.apply)) {
+			const textEditor = assertIsDefined(this.getControl());
+			textOptions.apply(textEditor, ScrollType.Smooth);
+		}
+	}
+
+	protected setEditorVisible(visible: boolean, group: IEditorGroup | undefined): void {
 
 		// Pass on to Editor
+		const editorControl = assertIsDefined(this.editorControl);
 		if (visible) {
-			this.editorControl.onVisible();
+			this.consumePendingConfigurationChangeEvent();
+			editorControl.onVisible();
 		} else {
-			this.editorControl.onHide();
+			editorControl.onHide();
 		}
 
-		return promise;
+		super.setEditorVisible(visible, group);
 	}
 
-	public focus(): void {
-		this.editorControl.focus();
-	}
-
-	public layout(dimension: Dimension): void {
+	focus(): void {
 
 		// Pass on to Editor
-		this.editorControl.layout(dimension);
+		const editorControl = assertIsDefined(this.editorControl);
+		editorControl.focus();
 	}
 
-	public getControl(): IEditor {
+	layout(dimension: Dimension): void {
+
+		// Pass on to Editor
+		const editorControl = assertIsDefined(this.editorControl);
+		editorControl.layout(dimension);
+	}
+
+	getControl(): IEditor | undefined {
 		return this.editorControl;
 	}
 
-	public getSelection(): IEditorSelection {
-		return this.editorControl.getSelection();
+	/**
+	 * Saves the text editor view state for the given resource.
+	 */
+	protected saveTextEditorViewState(resource: URI): void {
+		const editorViewState = this.retrieveTextEditorViewState(resource);
+		if (!editorViewState || !this.group) {
+			return;
+		}
+
+		this.editorMemento.saveEditorState(this.group, resource, editorViewState);
+	}
+
+	getViewState(): IEditorViewState | undefined {
+		const resource = this.input?.getResource();
+		if (resource) {
+			return withNullAsUndefined(this.retrieveTextEditorViewState(resource));
+		}
+
+		return undefined;
+	}
+
+	protected retrieveTextEditorViewState(resource: URI): IEditorViewState | null {
+		const control = this.getControl();
+		if (!isCodeEditor(control)) {
+			return null;
+		}
+
+		const model = control.getModel();
+		if (!model) {
+			return null; // view state always needs a model
+		}
+
+		const modelUri = model.uri;
+		if (!modelUri) {
+			return null; // model URI is needed to make sure we save the view state correctly
+		}
+
+		if (modelUri.toString() !== resource.toString()) {
+			return null; // prevent saving view state for a model that is not the expected one
+		}
+
+		return control.saveViewState();
 	}
 
 	/**
-	 * Saves the text editor view state under the given key.
+	 * Clears the text editor view state for the given resources.
 	 */
-	public saveTextEditorViewState(storageService: IStorageService, key: string): void {
-		let editorViewState = this.editorControl.saveViewState();
-
-		const memento = this.getMemento(storageService, Scope.WORKSPACE);
-		let editorViewStateMemento = memento[EDITOR_VIEW_STATE_PREFERENCE_KEY];
-		if (!editorViewStateMemento) {
-			editorViewStateMemento = {};
-			memento[EDITOR_VIEW_STATE_PREFERENCE_KEY] = editorViewStateMemento;
-		}
-
-		editorViewStateMemento[key] = editorViewState;
+	protected clearTextEditorViewState(resources: URI[], group?: IEditorGroup): void {
+		resources.forEach(resource => {
+			this.editorMemento.clearEditorState(resource, group);
+		});
 	}
 
 	/**
-	 * Clears the text editor view state under the given key.
+	 * Loads the text editor view state for the given resource and returns it.
 	 */
-	public clearTextEditorViewState(storageService: IStorageService, keys: string[]): void {
-		const memento = this.getMemento(storageService, Scope.WORKSPACE);
-		let editorViewStateMemento = memento[EDITOR_VIEW_STATE_PREFERENCE_KEY];
-		if (editorViewStateMemento) {
-			keys.forEach((key) => delete editorViewStateMemento[key]);
+	protected loadTextEditorViewState(resource: URI): IEditorViewState | undefined {
+		return this.group ? this.editorMemento.loadEditorState(this.group, resource) : undefined;
+	}
+
+	private updateEditorConfiguration(configuration?: IEditorConfiguration): void {
+		if (!configuration) {
+			const resource = this.getResource();
+			if (resource) {
+				configuration = this.configurationService.getValue<IEditorConfiguration>(resource);
+			}
+		}
+
+		if (!this.editorControl || !configuration) {
+			return;
+		}
+
+		const editorConfiguration = this.computeConfiguration(configuration);
+
+		// Try to figure out the actual editor options that changed from the last time we updated the editor.
+		// We do this so that we are not overwriting some dynamic editor settings (e.g. word wrap) that might
+		// have been applied to the editor directly.
+		let editorSettingsToApply = editorConfiguration;
+		if (this.lastAppliedEditorOptions) {
+			editorSettingsToApply = distinct(this.lastAppliedEditorOptions, editorSettingsToApply);
+		}
+
+		if (Object.keys(editorSettingsToApply).length > 0) {
+			this.lastAppliedEditorOptions = editorConfiguration;
+			this.editorControl.updateOptions(editorSettingsToApply);
 		}
 	}
 
-	/**
-	 * Loads the text editor view state for the given key and returns it.
-	 */
-	public loadTextEditorViewState(storageService: IStorageService, key: string): IEditorViewState {
-		const memento = this.getMemento(storageService, Scope.WORKSPACE);
-		let editorViewStateMemento = memento[EDITOR_VIEW_STATE_PREFERENCE_KEY];
-		if (editorViewStateMemento) {
-			return editorViewStateMemento[key];
+	protected getResource(): URI | undefined {
+		const codeEditor = getCodeEditor(this.editorControl);
+		if (codeEditor) {
+			const model = codeEditor.getModel();
+			if (model) {
+				return model.uri;
+			}
 		}
 
-		return null;
+		if (this.input) {
+			return this.input.getResource();
+		}
+
+		return undefined;
 	}
 
-	public dispose(): void {
+	protected abstract getAriaLabel(): string;
 
-		// Destroy Editor Control
-		this.editorControl.destroy();
+	dispose(): void {
+		this.lastAppliedEditorOptions = undefined;
 
 		super.dispose();
 	}

@@ -3,33 +3,46 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
 import 'vs/css!./scrollDecoration';
-import DomUtils = require('vs/base/browser/dom');
+import { FastDomNode, createFastDomNode } from 'vs/base/browser/fastDomNode';
+import { ViewPart } from 'vs/editor/browser/view/viewPart';
+import { RenderingContext, RestrictedRenderingContext } from 'vs/editor/common/view/renderingContext';
+import { ViewContext } from 'vs/editor/common/view/viewContext';
+import * as viewEvents from 'vs/editor/common/view/viewEvents';
+import { scrollbarShadow } from 'vs/platform/theme/common/colorRegistry';
+import { registerThemingParticipant } from 'vs/platform/theme/common/themeService';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
 
-import {ViewPart} from 'vs/editor/browser/view/viewPart';
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import EditorCommon = require('vs/editor/common/editorCommon');
 
 export class ScrollDecorationViewPart extends ViewPart {
 
-	private _domNode: HTMLElement;
+	private readonly _domNode: FastDomNode<HTMLElement>;
 	private _scrollTop: number;
 	private _width: number;
 	private _shouldShow: boolean;
+	private _useShadows: boolean;
 
-	constructor(context: EditorBrowser.IViewContext) {
+	constructor(context: ViewContext) {
 		super(context);
 
 		this._scrollTop = 0;
 		this._width = 0;
+		this._updateWidth();
 		this._shouldShow = false;
-		this._domNode = document.createElement('div');
+		const options = this._context.configuration.options;
+		const scrollbar = options.get(EditorOption.scrollbar);
+		this._useShadows = scrollbar.useShadows;
+		this._domNode = createFastDomNode(document.createElement('div'));
+		this._domNode.setAttribute('role', 'presentation');
+		this._domNode.setAttribute('aria-hidden', 'true');
+	}
+
+	public dispose(): void {
+		super.dispose();
 	}
 
 	private _updateShouldShow(): boolean {
-		var newShouldShow = (this._context.configuration.editor.scrollbar.useShadows && this._scrollTop > 0);
+		const newShouldShow = (this._useShadows && this._scrollTop > 0);
 		if (this._shouldShow !== newShouldShow) {
 			this._shouldShow = newShouldShow;
 			return true;
@@ -37,33 +50,51 @@ export class ScrollDecorationViewPart extends ViewPart {
 		return false;
 	}
 
-	public getDomNode(): HTMLElement {
+	public getDomNode(): FastDomNode<HTMLElement> {
 		return this._domNode;
+	}
+
+	private _updateWidth(): void {
+		const options = this._context.configuration.options;
+		const layoutInfo = options.get(EditorOption.layoutInfo);
+
+		if (layoutInfo.renderMinimap === 0 || (layoutInfo.minimapWidth > 0 && layoutInfo.minimapLeft === 0)) {
+			this._width = layoutInfo.width;
+		} else {
+			this._width = layoutInfo.width - layoutInfo.minimapWidth - layoutInfo.verticalScrollbarWidth;
+		}
 	}
 
 	// --- begin event handlers
 
-	public onConfigurationChanged(e: EditorCommon.IConfigurationChangedEvent): boolean {
-		return this._updateShouldShow();
+	public onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
+		const options = this._context.configuration.options;
+		const scrollbar = options.get(EditorOption.scrollbar);
+		this._useShadows = scrollbar.useShadows;
+		this._updateWidth();
+		this._updateShouldShow();
+		return true;
 	}
-	public onLayoutChanged(layoutInfo: EditorCommon.IEditorLayoutInfo): boolean {
-		if (this._width !== layoutInfo.width) {
-			this._width = layoutInfo.width;
-			return true;
-		}
-		return false;
-	}
-	public onScrollChanged(e: EditorCommon.IScrollEvent): boolean {
+	public onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
 		this._scrollTop = e.scrollTop;
 		return this._updateShouldShow();
 	}
 
 	// --- end event handlers
 
-	_render(ctx: EditorBrowser.IRenderingContext): void {
-		this._requestModificationFrame(() => {
-			DomUtils.StyleMutator.setWidth(this._domNode, this._width);
-			DomUtils.toggleClass(this._domNode, EditorBrowser.ClassNames.SCROLL_DECORATION, this._shouldShow);
-		});
+	public prepareRender(ctx: RenderingContext): void {
+		// Nothing to read
+	}
+
+	public render(ctx: RestrictedRenderingContext): void {
+		this._domNode.setWidth(this._width);
+		this._domNode.setClassName(this._shouldShow ? 'scroll-decoration' : '');
 	}
 }
+
+registerThemingParticipant((theme, collector) => {
+	const shadow = theme.getColor(scrollbarShadow);
+	if (shadow) {
+		collector.addRule(`.monaco-editor .scroll-decoration { box-shadow: ${shadow} 0 6px 6px -6px inset; }`);
+	}
+});

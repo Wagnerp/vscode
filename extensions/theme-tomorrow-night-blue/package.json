@@ -1,14 +1,17 @@
 {
 	"name": "theme-tomorrow-night-blue",
-	"version": "0.1.0",
+	"displayName": "%displayName%",
+	"description": "%description%",
+	"version": "1.0.0",
 	"publisher": "vscode",
+	"license": "MIT",
 	"engines": { "vscode": "*" },
 	"contributes": {
 		"themes": [
 			{
 				"label": "Tomorrow Night Blue",
 				"uiTheme": "vs-dark",
-				"path": "./themes/Tomorrow-Night-Blue.tmTheme"
+				"path": "./themes/tomorrow-night-blue-theme.json"
 			}
 		]
 	}

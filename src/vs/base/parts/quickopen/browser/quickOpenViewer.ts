@@ -3,11 +3,10 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Promise } from 'vs/base/common/winjs.base';
 import { isFunction } from 'vs/base/common/types';
-import { ActionBar, IActionItem } from 'vs/base/browser/ui/actionbar/actionbar';
-import { ITree, IRenderer, IFilter, IDataSource } from 'vs/base/parts/tree/common/tree';
-import { IModel } from './quickOpen';
+import { ITree, IRenderer, IFilter, IDataSource, IAccessibilityProvider } from 'vs/base/parts/tree/browser/tree';
+import { IModel } from 'vs/base/parts/quickopen/common/quickOpen';
+import { IQuickOpenStyles } from 'vs/base/parts/quickopen/browser/quickOpenWidget';
 
 export interface IModelProvider {
 	getModel<T>(): IModel<T>;
@@ -25,7 +24,7 @@ export class DataSource implements IDataSource {
 
 	getId(tree: ITree, element: any): string {
 		if (!element) {
-			return null;
+			return null!;
 		}
 
 		const model = this.modelProvider.getModel();
@@ -34,16 +33,59 @@ export class DataSource implements IDataSource {
 
 	hasChildren(tree: ITree, element: any): boolean {
 		const model = this.modelProvider.getModel();
-		return model && model === element && model.entries.length > 0;
+		return !!(model && model === element && model.entries.length > 0);
 	}
 
-	getChildren(tree: ITree, element: any): Promise {
+	getChildren(tree: ITree, element: any): Promise<any[]> {
 		const model = this.modelProvider.getModel();
-		return Promise.as(model === element ? model.entries : []);
+		return Promise.resolve(model === element ? model.entries : []);
 	}
 
-	getParent(tree: ITree, element: any): Promise {
-		return Promise.as(null);
+	getParent(tree: ITree, element: any): Promise<any> {
+		return Promise.resolve(null);
+	}
+}
+
+export class AccessibilityProvider implements IAccessibilityProvider {
+	constructor(private modelProvider: IModelProvider) { }
+
+	getAriaLabel(tree: ITree, element: any): string | null {
+		const model = this.modelProvider.getModel();
+
+		return model.accessibilityProvider ? model.accessibilityProvider.getAriaLabel(element) : null;
+	}
+
+	getPosInSet(tree: ITree, element: any): string {
+		const model = this.modelProvider.getModel();
+		let i = 0;
+		if (model.filter) {
+			for (const entry of model.entries) {
+				if (model.filter.isVisible(entry)) {
+					i++;
+				}
+				if (entry === element) {
+					break;
+				}
+			}
+		} else {
+			i = model.entries.indexOf(element) + 1;
+		}
+		return String(i);
+	}
+
+	getSetSize(): string {
+		const model = this.modelProvider.getModel();
+		let n = 0;
+		if (model.filter) {
+			for (const entry of model.entries) {
+				if (model.filter.isVisible(entry)) {
+					n++;
+				}
+			}
+		} else {
+			n = model.entries.length;
+		}
+		return String(n);
 	}
 }
 
@@ -63,8 +105,15 @@ export class Filter implements IFilter {
 }
 
 export class Renderer implements IRenderer {
+	private styles: IQuickOpenStyles;
 
-	constructor(private modelProvider: IModelProvider) { }
+	constructor(private modelProvider: IModelProvider, styles: IQuickOpenStyles) {
+		this.styles = styles;
+	}
+
+	updateStyles(styles: IQuickOpenStyles): void {
+		this.styles = styles;
+	}
 
 	getHeight(tree: ITree, element: any): number {
 		const model = this.modelProvider.getModel();
@@ -78,12 +127,12 @@ export class Renderer implements IRenderer {
 
 	renderTemplate(tree: ITree, templateId: string, container: HTMLElement): any {
 		const model = this.modelProvider.getModel();
-		return model.renderer.renderTemplate(templateId, container);
+		return model.renderer.renderTemplate(templateId, container, this.styles);
 	}
 
 	renderElement(tree: ITree, element: any, templateId: string, templateData: any): void {
 		const model = this.modelProvider.getModel();
-		model.renderer.renderElement(element, templateId, templateData);
+		model.renderer.renderElement(element, templateId, templateData, this.styles);
 	}
 
 	disposeTemplate(tree: ITree, templateId: string, templateData: any): void {

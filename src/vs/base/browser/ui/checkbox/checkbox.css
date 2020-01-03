@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-.custom-checkbox {
+.monaco-custom-checkbox {
 	margin-left: 2px;
 	float: left;
 	cursor: pointer;
@@ -13,51 +13,38 @@
 	height: 20px;
 	border: 1px solid transparent;
 	padding: 1px;
-
-	-webkit-box-sizing:	border-box;
-	-o-box-sizing:		border-box;
-	-moz-box-sizing:	border-box;
-	-ms-box-sizing:		border-box;
-	box-sizing:			border-box;
-
-	-webkit-user-select: none;
-	-khtml-user-select: none;
-	-moz-user-select: none;
-	-o-user-select: none;
-	-ms-user-select: none;
+	box-sizing:	border-box;
 	user-select: none;
+	-webkit-user-select: none;
+	-ms-user-select: none;
 }
 
-.custom-checkbox:hover,
-.custom-checkbox.checked {
+.monaco-custom-checkbox:hover,
+.monaco-custom-checkbox.checked {
 	opacity: 1;
 }
 
-.custom-checkbox:hover {
-	background-color: #EEE;
-}
-
-.custom-checkbox.checked {
-	border-color: #007ACC;
-}
-
-.vs-dark .custom-checkbox:hover {
-	background-color: #292929;
-}
-
-.vs-dark .custom-checkbox.checked {
-	border-color: #007ACC;
-}
-
-.hc-black .custom-checkbox {
-	background: none;
-	border: none;
-}
-
-.hc-black .custom-checkbox:hover {
+.hc-black .monaco-custom-checkbox {
 	background: none;
 }
 
-.hc-black .custom-checkbox.checked {
-	border: 1px solid #DF740C;
+.hc-black .monaco-custom-checkbox:hover {
+	background: none;
+}
+
+.monaco-custom-checkbox.monaco-simple-checkbox {
+	height: 18px;
+	width: 18px;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	margin-right: 9px;
+	margin-left: 0px;
+	padding: 0px;
+	opacity: 1;
+	background-size: 16px !important;
+}
+
+/* hide check when unchecked */
+.monaco-custom-checkbox.monaco-simple-checkbox.unchecked:not(.checked)::before {
+	visibility: hidden;;
 }

@@ -2,51 +2,18 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import {IEventEmitter} from 'vs/base/common/eventEmitter';
-import {IAction, IActionItem} from 'vs/base/common/actions';
-import {ISelection} from 'vs/platform/selection/common/selection';
+import { RawContextKey } from 'vs/platform/contextkey/common/contextkey';
+import { IPaneComposite } from 'vs/workbench/common/panecomposite';
 
-export interface IViewlet {
+export const SideBarVisibleContext = new RawContextKey<boolean>('sideBarVisible', false);
+export const SidebarFocusContext = new RawContextKey<boolean>('sideBarFocus', false);
+export const ActiveViewletContext = new RawContextKey<string>('activeViewlet', '');
 
-	/**
-	 * Returns the unique identifier of this viewlet.
-	 */
-	getId(): string;
+export interface IViewlet extends IPaneComposite {
 
 	/**
-	 * Returns the name of this viewlet to show in the title area.
+	 * Returns the minimal width needed to avoid any content horizontal truncation
 	 */
-	getTitle(): string;
-
-	/**
-	 * Returns the primary actions of the viewlet.
-	 */
-	getActions(): IAction[];
-
-	/**
-	 * Returns the secondary actions of the viewlet.
-	 */
-	getSecondaryActions(): IAction[];
-
-	/**
-	 * Returns the action item for a specific action.
-	 */
-	getActionItem(action: IAction): IActionItem;
-
-	/**
-	 * Returns the underlying control of this viewlet.
-	 */
-	getControl(): IEventEmitter;
-
-	/**
-	 * Returns the selection of this viewlet.
-	 */
-	getSelection(): ISelection;
-
-	/**
-	 * Asks the underlying control to focus.
-	 */
-	focus(): void;
+	getOptimalWidth(): number | undefined;
 }

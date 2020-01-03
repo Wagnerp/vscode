@@ -3,577 +3,325 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
 import 'vs/css!./media/sidebarpart';
-import {TPromise} from 'vs/base/common/winjs.base';
-import nls = require('vs/nls');
-import {Registry} from 'vs/platform/platform';
-import {IDisposable} from 'vs/base/common/lifecycle';
-import {Dimension, Builder, $} from 'vs/base/browser/builder';
-import uuid = require('vs/base/common/uuid');
-import events = require('vs/base/common/events');
-import timer = require('vs/base/common/timer');
-import strings = require('vs/base/common/strings');
-import types = require('vs/base/common/types');
-import errors = require('vs/base/common/errors');
-import {CONTEXT as ToolBarContext, ToolBar} from 'vs/base/browser/ui/toolbar/toolbar';
-import {IActionItem, ActionsOrientation} from 'vs/base/browser/ui/actionbar/actionbar';
-import {ProgressBar} from 'vs/base/browser/ui/progressbar/progressbar';
-import {Scope, IActionBarRegistry, Extensions, prepareActions} from 'vs/workbench/browser/actionBarRegistry';
-import {Action, IAction} from 'vs/base/common/actions';
-import {Part} from 'vs/workbench/browser/part';
-import {EventType as WorkbenchEventType, ViewletEvent} from 'vs/workbench/browser/events';
-import {Viewlet, EventType as ViewletEventType, IViewletRegistry, Extensions as ViewletExtensions} from 'vs/workbench/browser/viewlet';
-import {IWorkbenchActionRegistry, Extensions as ActionExtensions} from 'vs/workbench/browser/actionRegistry';
-import {SyncActionDescriptor} from 'vs/platform/actions/common/actions';
-import {WorkbenchProgressService} from 'vs/workbench/services/progress/browser/progressService';
-import {IViewletService} from 'vs/workbench/services/viewlet/common/viewletService';
-import {IPartService} from 'vs/workbench/services/part/common/partService';
-import {IViewlet} from 'vs/workbench/common/viewlet';
-import {IStorageService, StorageScope} from 'vs/platform/storage/common/storage';
-import {IContextMenuService} from 'vs/platform/contextview/browser/contextView';
-import {IEventService} from 'vs/platform/event/common/event';
-import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
-import {IMessageService, Severity} from 'vs/platform/message/common/message';
-import {IProgressService} from 'vs/platform/progress/common/progress';
-import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
-import {IKeybindingService} from 'vs/platform/keybinding/common/keybindingService';
-import {KeybindingsUtils} from 'vs/platform/keybinding/common/keybindingsUtils';
-import {KeyMod, KeyCode} from 'vs/base/common/keyCodes';
+import * as nls from 'vs/nls';
+import { Registry } from 'vs/platform/registry/common/platform';
+import { Action } from 'vs/base/common/actions';
+import { CompositePart } from 'vs/workbench/browser/parts/compositePart';
+import { Viewlet, ViewletRegistry, Extensions as ViewletExtensions, ViewletDescriptor } from 'vs/workbench/browser/viewlet';
+import { IWorkbenchActionRegistry, Extensions as ActionExtensions } from 'vs/workbench/common/actions';
+import { SyncActionDescriptor } from 'vs/platform/actions/common/actions';
+import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
+import { IWorkbenchLayoutService, Parts, Position as SideBarPosition } from 'vs/workbench/services/layout/browser/layoutService';
+import { IViewlet, SidebarFocusContext, ActiveViewletContext } from 'vs/workbench/common/viewlet';
+import { IStorageService } from 'vs/platform/storage/common/storage';
+import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
+import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
+import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
+import { KeyMod, KeyCode } from 'vs/base/common/keyCodes';
+import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { Event, Emitter } from 'vs/base/common/event';
+import { IThemeService } from 'vs/platform/theme/common/themeService';
+import { contrastBorder } from 'vs/platform/theme/common/colorRegistry';
+import { SIDE_BAR_TITLE_FOREGROUND, SIDE_BAR_BACKGROUND, SIDE_BAR_FOREGROUND, SIDE_BAR_BORDER } from 'vs/workbench/common/theme';
+import { INotificationService } from 'vs/platform/notification/common/notification';
+import { EventType, addDisposableListener, trackFocus } from 'vs/base/browser/dom';
+import { StandardMouseEvent } from 'vs/base/browser/mouseEvent';
+import { IContextKey, IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
+import { AnchorAlignment } from 'vs/base/browser/ui/contextview/contextview';
+import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+import { LayoutPriority } from 'vs/base/browser/ui/grid/grid';
+import { assertIsDefined } from 'vs/base/common/types';
 
-export class SidebarPart extends Part implements IViewletService {
+export class SidebarPart extends CompositePart<Viewlet> implements IViewletService {
 
-	public serviceId = IViewletService;
+	_serviceBrand: undefined;
 
-	private instantiationService: IInstantiationService;
-	private activeViewletListeners: { (): void; }[];
-	private instantiatedViewletListeners: { (): void; }[];
-	private mapViewletToViewletContainer: { [viewletId: string]: Builder; };
-	private mapActionsBindingToViewlet: { [viewletId: string]: () => void; };
-	private mapProgressServiceToViewlet: { [viewletId: string]: IProgressService; };
-	private activeViewlet: Viewlet;
-	private lastActiveViewletId: string;
-	private instantiatedViewlets: Viewlet[];
-	private titleLabel: Builder;
-	private toolBar: ToolBar;
-	private viewletLoaderPromises: { [viewletId: string]: TPromise<Viewlet>; };
-	private progressBar: ProgressBar;
-	private contentAreaSize: Dimension;
-	private blockOpeningViewlet: boolean;
-	private registry: IViewletRegistry;
-	private telemetryActionsListener: IDisposable;
-	private currentViewletOpenToken: string;
+	static readonly activeViewletSettingsKey = 'workbench.sidebar.activeviewletid';
+
+	//#region IView
+
+	readonly minimumWidth: number = 170;
+	readonly maximumWidth: number = Number.POSITIVE_INFINITY;
+	readonly minimumHeight: number = 0;
+	readonly maximumHeight: number = Number.POSITIVE_INFINITY;
+
+	readonly priority: LayoutPriority = LayoutPriority.Low;
+
+	readonly snap = true;
+
+	get preferredWidth(): number | undefined {
+		const viewlet = this.getActiveViewlet();
+
+		if (!viewlet) {
+			return;
+		}
+
+		const width = viewlet.getOptimalWidth();
+		if (typeof width !== 'number') {
+			return;
+		}
+
+		return Math.max(width, 300);
+	}
+
+	//#endregion
+
+	get onDidViewletRegister(): Event<ViewletDescriptor> { return <Event<ViewletDescriptor>>this.viewletRegistry.onDidRegister; }
+
+	private _onDidViewletDeregister = this._register(new Emitter<ViewletDescriptor>());
+	readonly onDidViewletDeregister: Event<ViewletDescriptor> = this._onDidViewletDeregister.event;
+
+	get onDidViewletOpen(): Event<IViewlet> { return Event.map(this.onDidCompositeOpen.event, compositeEvent => <IViewlet>compositeEvent.composite); }
+	get onDidViewletClose(): Event<IViewlet> { return this.onDidCompositeClose.event as Event<IViewlet>; }
+
+	private viewletRegistry: ViewletRegistry;
+	private sideBarFocusContextKey: IContextKey<boolean>;
+	private activeViewletContextKey: IContextKey<string>;
+	private blockOpeningViewlet = false;
 
 	constructor(
-		private messageService: IMessageService,
-		private storageService: IStorageService,
-		private eventService: IEventService,
-		private telemetryService: ITelemetryService,
-		private contextMenuService: IContextMenuService,
-		private partService: IPartService,
-		private keybindingService: IKeybindingService,
-		id: string
+		@INotificationService notificationService: INotificationService,
+		@IStorageService storageService: IStorageService,
+		@ITelemetryService telemetryService: ITelemetryService,
+		@IContextMenuService contextMenuService: IContextMenuService,
+		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
+		@IKeybindingService keybindingService: IKeybindingService,
+		@IInstantiationService instantiationService: IInstantiationService,
+		@IThemeService themeService: IThemeService,
+		@IContextKeyService contextKeyService: IContextKeyService,
+		@IExtensionService private readonly extensionService: IExtensionService
 	) {
-		super(id);
+		super(
+			notificationService,
+			storageService,
+			telemetryService,
+			contextMenuService,
+			layoutService,
+			keybindingService,
+			instantiationService,
+			themeService,
+			Registry.as<ViewletRegistry>(ViewletExtensions.Viewlets),
+			SidebarPart.activeViewletSettingsKey,
+			Registry.as<ViewletRegistry>(ViewletExtensions.Viewlets).getDefaultViewletId(),
+			'sideBar',
+			'viewlet',
+			SIDE_BAR_TITLE_FOREGROUND,
+			Parts.SIDEBAR_PART,
+			{ hasTitle: true, borderWidth: () => (this.getColor(SIDE_BAR_BORDER) || this.getColor(contrastBorder)) ? 1 : 0 }
+		);
 
-		this.activeViewletListeners = [];
-		this.instantiatedViewletListeners = [];
-		this.mapViewletToViewletContainer = {};
-		this.mapActionsBindingToViewlet = {};
-		this.mapProgressServiceToViewlet = {};
-		this.activeViewlet = null;
-		this.instantiatedViewlets = [];
-		this.viewletLoaderPromises = {};
-		this.registry = (<IViewletRegistry>Registry.as(ViewletExtensions.Viewlets));
+		this.viewletRegistry = Registry.as<ViewletRegistry>(ViewletExtensions.Viewlets);
+
+		this.sideBarFocusContextKey = SidebarFocusContext.bindTo(contextKeyService);
+		this.activeViewletContextKey = ActiveViewletContext.bindTo(contextKeyService);
+
+		this.registerListeners();
 	}
 
-	public setInstantiationService(service: IInstantiationService): void {
-		this.instantiationService = service;
+	private registerListeners(): void {
+
+		// Viewlet open
+		this._register(this.onDidViewletOpen(viewlet => {
+			this.activeViewletContextKey.set(viewlet.getId());
+		}));
+
+		// Viewlet close
+		this._register(this.onDidViewletClose(viewlet => {
+			if (this.activeViewletContextKey.get() === viewlet.getId()) {
+				this.activeViewletContextKey.reset();
+			}
+		}));
+
+		// Viewlet deregister
+		this._register(this.registry.onDidDeregister(async (viewletDescriptor: ViewletDescriptor) => {
+			const activeViewlet = this.getActiveViewlet();
+			if (!activeViewlet || activeViewlet.getId() === viewletDescriptor.id) {
+				await this.openViewlet(this.getDefaultViewletId());
+			}
+
+			this.removeComposite(viewletDescriptor.id);
+			this._onDidViewletDeregister.fire(viewletDescriptor);
+		}));
 	}
 
-	public openViewlet(id: string, focus?: boolean): TPromise<Viewlet> {
+	create(parent: HTMLElement): void {
+		this.element = parent;
+
+		super.create(parent);
+
+		const focusTracker = this._register(trackFocus(parent));
+		this._register(focusTracker.onDidFocus(() => this.sideBarFocusContextKey.set(true)));
+		this._register(focusTracker.onDidBlur(() => this.sideBarFocusContextKey.set(false)));
+	}
+
+	createTitleArea(parent: HTMLElement): HTMLElement {
+		const titleArea = super.createTitleArea(parent);
+
+		this._register(addDisposableListener(titleArea, EventType.CONTEXT_MENU, e => {
+			this.onTitleAreaContextMenu(new StandardMouseEvent(e));
+		}));
+
+		return titleArea;
+	}
+
+	updateStyles(): void {
+		super.updateStyles();
+
+		// Part container
+		const container = assertIsDefined(this.getContainer());
+
+		container.style.backgroundColor = this.getColor(SIDE_BAR_BACKGROUND) || '';
+		container.style.color = this.getColor(SIDE_BAR_FOREGROUND);
+
+		const borderColor = this.getColor(SIDE_BAR_BORDER) || this.getColor(contrastBorder);
+		const isPositionLeft = this.layoutService.getSideBarPosition() === SideBarPosition.LEFT;
+		container.style.borderRightWidth = borderColor && isPositionLeft ? '1px' : '';
+		container.style.borderRightStyle = borderColor && isPositionLeft ? 'solid' : '';
+		container.style.borderRightColor = isPositionLeft ? borderColor || '' : '';
+		container.style.borderLeftWidth = borderColor && !isPositionLeft ? '1px' : '';
+		container.style.borderLeftStyle = borderColor && !isPositionLeft ? 'solid' : '';
+		container.style.borderLeftColor = !isPositionLeft ? borderColor || '' : '';
+	}
+
+	layout(width: number, height: number): void {
+		if (!this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
+			return;
+		}
+
+		super.layout(width, height);
+	}
+
+	// Viewlet service
+
+	getActiveViewlet(): IViewlet | undefined {
+		return <IViewlet>this.getActiveComposite();
+	}
+
+	getLastActiveViewletId(): string {
+		return this.getLastActiveCompositetId();
+	}
+
+	hideActiveViewlet(): void {
+		this.hideActiveComposite();
+	}
+
+	async openViewlet(id: string | undefined, focus?: boolean): Promise<IViewlet | undefined> {
+		if (typeof id === 'string' && this.getViewlet(id)) {
+			return this.doOpenViewlet(id, focus);
+		}
+
+		await this.extensionService.whenInstalledExtensionsRegistered();
+
+		if (typeof id === 'string' && this.getViewlet(id)) {
+			return this.doOpenViewlet(id, focus);
+		}
+
+		return undefined;
+	}
+
+	getViewlets(): ViewletDescriptor[] {
+		return this.viewletRegistry.getViewlets().sort((v1, v2) => {
+			if (typeof v1.order !== 'number') {
+				return -1;
+			}
+
+			if (typeof v2.order !== 'number') {
+				return 1;
+			}
+
+			return v1.order - v2.order;
+		});
+	}
+
+	getDefaultViewletId(): string {
+		return this.viewletRegistry.getDefaultViewletId();
+	}
+
+	getViewlet(id: string): ViewletDescriptor {
+		return this.getViewlets().filter(viewlet => viewlet.id === id)[0];
+	}
+
+	private doOpenViewlet(id: string, focus?: boolean): Viewlet | undefined {
 		if (this.blockOpeningViewlet) {
-			return TPromise.as(null); // Workaround against a potential race condition
+			return undefined; // Workaround against a potential race condition
 		}
 
 		// First check if sidebar is hidden and show if so
-		if (this.partService.isSideBarHidden()) {
+		if (!this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
 			try {
 				this.blockOpeningViewlet = true;
-				this.partService.setSideBarHidden(false);
+				this.layoutService.setSideBarHidden(false);
 			} finally {
 				this.blockOpeningViewlet = false;
 			}
 		}
 
-		// Check if viewlet already visible and just focus in that case
-		if (this.activeViewlet && this.activeViewlet.getId() === id) {
-			if (focus) {
-				this.activeViewlet.focus();
-			}
-
-			// Fullfill promise with viewlet that is being opened
-			return TPromise.as(this.activeViewlet);
-		}
-
-		// Open
-		return this.doOpenViewlet(id, focus);
+		return this.openComposite(id, focus) as Viewlet;
 	}
 
-	private doOpenViewlet(id: string, focus?: boolean): TPromise<Viewlet> {
-		let timerEvent = timer.start(timer.Topic.WORKBENCH, strings.format('Open Viewlet {0}', id.substr(id.lastIndexOf('.') + 1)));
+	protected getTitleAreaDropDownAnchorAlignment(): AnchorAlignment {
+		return this.layoutService.getSideBarPosition() === SideBarPosition.LEFT ? AnchorAlignment.LEFT : AnchorAlignment.RIGHT;
+	}
 
-		// Use a generated token to avoid race conditions from long running promises
-		let currentViewletOpenToken = uuid.generateUuid();
-		this.currentViewletOpenToken = currentViewletOpenToken;
-
-		// Emit Viewlet Opening Event
-		this.emit(WorkbenchEventType.VIEWLET_OPENING, new ViewletEvent(id));
-
-		// Hide current
-		let hidePromise: TPromise<void>;
-		if (this.activeViewlet) {
-			hidePromise = this.hideActiveViewlet();
-		} else {
-			hidePromise = TPromise.as(null);
-		}
-
-		return hidePromise.then(() => {
-
-			// Update Title
-			this.updateTitle(id);
-
-			// Create viewlet
-			return this.createViewlet(id, true).then((viewlet: Viewlet) => {
-
-				// Check if another viewlet opened meanwhile and return in that case
-				if ((this.currentViewletOpenToken !== currentViewletOpenToken) || (this.activeViewlet && this.activeViewlet.getId() !== viewlet.getId())) {
-					timerEvent.stop();
-
-					return TPromise.as(null);
-				}
-
-				// Check if viewlet already visible and just focus in that case
-				if (this.activeViewlet && this.activeViewlet.getId() === viewlet.getId()) {
-					if (focus) {
-						viewlet.focus();
-					}
-
-					timerEvent.stop();
-
-					// Fullfill promise with viewlet that is being opened
-					return TPromise.as(viewlet);
-				}
-
-				// Show Viewlet and Focus
-				return this.showViewlet(viewlet).then(() => {
-					if (focus) {
-						viewlet.focus();
-					}
-
-					timerEvent.stop();
-
-					// Fullfill promise with viewlet that is being opened
-					return viewlet;
+	private onTitleAreaContextMenu(event: StandardMouseEvent): void {
+		const activeViewlet = this.getActiveViewlet() as Viewlet;
+		if (activeViewlet) {
+			const contextMenuActions = activeViewlet ? activeViewlet.getContextMenuActions() : [];
+			if (contextMenuActions.length) {
+				const anchor: { x: number, y: number } = { x: event.posx, y: event.posy };
+				this.contextMenuService.showContextMenu({
+					getAnchor: () => anchor,
+					getActions: () => contextMenuActions,
+					getActionViewItem: action => this.actionViewItemProvider(action as Action),
+					actionRunner: activeViewlet.getActionRunner()
 				});
-			});
-		});
-	}
-
-	private createViewlet(id: string, isActive?: boolean): TPromise<Viewlet> {
-
-		// Check if viewlet is already created
-		for (let i = 0; i < this.instantiatedViewlets.length; i++) {
-			if (this.instantiatedViewlets[i].getId() === id) {
-				return TPromise.as(this.instantiatedViewlets[i]);
 			}
 		}
-
-		// Instantiate viewlet from registry otherwise
-		let viewletDescriptor = this.registry.getViewlet(id);
-		if (viewletDescriptor) {
-			let loaderPromise = this.viewletLoaderPromises[id];
-			if (!loaderPromise) {
-				let progressService = new WorkbenchProgressService(this.eventService, this.progressBar, viewletDescriptor.id, isActive);
-				let services = {
-					progressService: progressService
-				};
-				let viewletInstantiationService = this.instantiationService.createChild(services);
-
-				loaderPromise = viewletInstantiationService.createInstance(viewletDescriptor).then((viewlet: Viewlet) => {
-					this.mapProgressServiceToViewlet[viewlet.getId()] = progressService;
-
-					// Remember as Instantiated
-					this.instantiatedViewlets.push(viewlet);
-
-					// Register to title area update events from the viewlet
-					this.instantiatedViewletListeners.push(viewlet.addListener(ViewletEventType.INTERNAL_VIEWLET_TITLE_AREA_UPDATE, (e) => { this.onTitleAreaUpdate(e); }));
-
-					// Remove from Promises Cache since Loaded
-					delete this.viewletLoaderPromises[id];
-
-					return viewlet;
-				});
-
-				// Report progress for slow loading promises if workbench is already created and thus this is user initiated
-				if (this.partService.isCreated()) {
-					progressService.showWhile(loaderPromise, 800);
-				}
-
-				// Add to Promise Cache until Loaded
-				this.viewletLoaderPromises[id] = loaderPromise;
-			}
-
-			return loaderPromise;
-		}
-
-		throw new Error(strings.format('Unable to find viewlet with id {0}', id));
 	}
 
-	private showViewlet(viewlet: Viewlet): TPromise<void> {
-
-		// Remember Viewlet
-		this.activeViewlet = viewlet;
-
-		// Remember
-		this.lastActiveViewletId = this.activeViewlet.getId();
-
-		// Register as Emitter to Workbench Bus
-		this.activeViewletListeners.push(this.eventService.addEmitter(this.activeViewlet, this.activeViewlet.getId()));
-
-		let createViewletPromise: TPromise<void>;
-
-		// Viewlet created for the first time
-		let viewletContainer = this.mapViewletToViewletContainer[viewlet.getId()];
-		if (!viewletContainer) {
-
-			// Build Container off-DOM
-			viewletContainer = $().div({
-				'class': 'viewlet',
-				id: viewlet.getId()
-			}, (div: Builder) => {
-				createViewletPromise = viewlet.create(div);
-			});
-
-			// Remember viewlet container
-			this.mapViewletToViewletContainer[viewlet.getId()] = viewletContainer;
-		}
-
-		// Viewlet already exists but is hidden
-		else {
-			createViewletPromise = TPromise.as(null);
-		}
-
-		// Report progress for slow loading promises (but only if we did not create the viewlet before already and only if this is user initiated)
-		let progressService = this.mapProgressServiceToViewlet[viewlet.getId()];
-		if (progressService && !viewletContainer && this.partService.isCreated()) {
-			this.mapProgressServiceToViewlet[viewlet.getId()].showWhile(createViewletPromise, 800);
-		}
-
-		// Fill Content and Actions
-		return createViewletPromise.then(() => {
-
-			// Make sure that the user meanwhile did not open another viewlet or closed the sidebar
-			if (!this.activeViewlet || viewlet.getId() !== this.activeViewlet.getId()) {
-				return;
-			}
-
-			// Take Viewlet on-DOM and show
-			viewletContainer.build(this.getContentArea());
-			viewletContainer.show();
-
-			// Setup action runner
-			this.toolBar.actionRunner = viewlet.getActionRunner();
-
-			// Update title with viewlet title if it differs from descriptor
-			let descriptor = this.registry.getViewlet(viewlet.getId());
-			if (descriptor && descriptor.name !== viewlet.getTitle()) {
-				this.updateTitle(viewlet.getId(), viewlet.getTitle());
-			}
-
-			// Handle Viewlet Actions
-			let actionsBinding = this.mapActionsBindingToViewlet[viewlet.getId()];
-			if (!actionsBinding) {
-				actionsBinding = this.collectViewletActions(viewlet);
-				this.mapActionsBindingToViewlet[viewlet.getId()] = actionsBinding;
-			}
-			actionsBinding();
-
-			if (this.telemetryActionsListener) {
-				this.telemetryActionsListener.dispose();
-				this.telemetryActionsListener = null;
-			}
-
-			// Action Run Handling
-			this.telemetryActionsListener = this.toolBar.actionRunner.addListener2(events.EventType.RUN, (e: any) => {
-
-				// Check for Error
-				if (e.error && !errors.isPromiseCanceledError(e.error)) {
-					this.messageService.show(Severity.Error, e.error);
-				}
-
-				// Log in telemetry
-				if (this.telemetryService) {
-					this.telemetryService.publicLog('workbenchActionExecuted', { id: e.action.id, from: 'sideBar' });
-				}
-			});
-
-			// Indicate to viewlet that it is now visible
-			return viewlet.setVisible(true).then(() => {
-
-				// Make sure that the user meanwhile did not open another viewlet or closed the sidebar
-				if (!this.activeViewlet || viewlet.getId() !== this.activeViewlet.getId()) {
-					return;
-				}
-
-				// Make sure the viewlet is layed out
-				if (this.contentAreaSize) {
-					viewlet.layout(this.contentAreaSize);
-				}
-
-				// Emit Viewlet Opened Event
-				this.emit(WorkbenchEventType.VIEWLET_OPENED, new ViewletEvent(this.activeViewlet.getId()));
-			});
-		}, (error: any) => this.onError(error));
-	}
-
-	private onTitleAreaUpdate(e: ViewletEvent): void {
-
-		// Active Viewlet
-		if (this.activeViewlet && this.activeViewlet.getId() === e.viewletId) {
-
-			// Title
-			this.updateTitle(this.activeViewlet.getId(), this.activeViewlet.getTitle());
-
-			// Actions
-			let actionsBinding = this.collectViewletActions(this.activeViewlet);
-			this.mapActionsBindingToViewlet[this.activeViewlet.getId()] = actionsBinding;
-			actionsBinding();
-		}
-
-		// Otherwise invalidate actions binding for next time when the viewlet becomes visible
-		else {
-			delete this.mapActionsBindingToViewlet[e.viewletId];
-		}
-	}
-
-	private updateTitle(viewletId: string, viewletTitle?: string): void {
-		let viewletDescriptor = this.registry.getViewlet(viewletId);
-		if (!viewletDescriptor) {
-			return;
-		}
-
-		if (!viewletTitle) {
-			viewletTitle = viewletDescriptor.name;
-		}
-
-		let keybinding: string = null;
-		let keys = this.keybindingService.lookupKeybindings(viewletId).map(k => k.toLabel());
-		if (keys && keys.length) {
-			keybinding = keys[0];
-		}
-
-		this.titleLabel.safeInnerHtml(viewletTitle);
-		this.titleLabel.title(keybinding ? nls.localize('viewletTitleTooltip', "{0} ({1})", viewletTitle, keybinding) : viewletTitle);
-	}
-
-	private collectViewletActions(viewlet: Viewlet): () => void {
-
-		// From Viewlet
-		let primaryActions: IAction[] = viewlet.getActions();
-		let secondaryActions: IAction[] = viewlet.getSecondaryActions();
-
-		// From Contributions
-		let actionBarRegistry = <IActionBarRegistry>Registry.as(Extensions.Actionbar);
-		primaryActions.push(...actionBarRegistry.getActionBarActionsForContext(Scope.VIEW, viewlet));
-		secondaryActions.push(...actionBarRegistry.getSecondaryActionBarActionsForContext(Scope.VIEW, viewlet));
-
-		// Return fn to set into toolbar
-		return this.toolBar.setActions(prepareActions(primaryActions), prepareActions(secondaryActions));
-	}
-
-	public getActiveViewlet(): IViewlet {
-		return this.activeViewlet;
-	}
-
-	public getLastActiveViewletId(): string {
-		return this.lastActiveViewletId;
-	}
-
-	public hideActiveViewlet(): TPromise<void> {
-		if (!this.activeViewlet) {
-			return TPromise.as(null); // Nothing to do
-		}
-
-		let viewlet = this.activeViewlet;
-		this.activeViewlet = null;
-
-		let viewletContainer = this.mapViewletToViewletContainer[viewlet.getId()];
-
-		// Indicate to Viewlet
-		return viewlet.setVisible(false).then(() => {
-
-			// Take Container Off-DOM and hide
-			viewletContainer.offDOM();
-			viewletContainer.hide();
-
-			// Clear any running Progress
-			this.progressBar.stop().getContainer().hide();
-
-			// Empty Actions
-			this.toolBar.setActions([])();
-
-			// Clear Listeners
-			while (this.activeViewletListeners.length) {
-				this.activeViewletListeners.pop()();
-			}
-
-			// Emit Viewlet Closed Event
-			this.emit(WorkbenchEventType.VIEWLET_CLOSED, new ViewletEvent(viewlet.getId()));
-		});
-	}
-
-	public createTitleArea(parent: Builder): Builder {
-
-		// Title Area Container
-		let titleArea = $(parent).div({
-			'class': 'title'
-		});
-
-		// Right Actions Container
-		$(titleArea).div({
-			'class': 'title-actions'
-		}, (div) => {
-
-			// Toolbar
-			this.toolBar = new ToolBar(div.getHTMLElement(), this.contextMenuService, {
-				actionItemProvider: (action: Action) => this.actionItemProvider(action),
-				orientation: ActionsOrientation.HORIZONTAL
-			});
-		});
-
-		// Left Title Label
-		$(titleArea).div({
-			'class': 'title-label'
-		}, (div) => {
-			this.titleLabel = div.span();
-		});
-
-		return titleArea;
-	}
-
-	private actionItemProvider(action: Action): IActionItem {
-		let actionItem: IActionItem;
-
-		// Check Active Viewlet
-		if (this.activeViewlet) {
-			actionItem = this.activeViewlet.getActionItem(action);
-		}
-
-		// Check Registry
-		if (!actionItem) {
-			let actionBarRegistry = <IActionBarRegistry>Registry.as(Extensions.Actionbar);
-			actionItem = actionBarRegistry.getActionItemForContext(Scope.VIEW, ToolBarContext, action);
-		}
-
-		return actionItem;
-	}
-
-	public createContentArea(parent: Builder): Builder {
-		return $(parent).div({
-			'class': 'content'
-		}, (div: Builder) => {
-			this.progressBar = new ProgressBar(div);
-			this.progressBar.getContainer().hide();
-		});
-	}
-
-	private onError(error: any): void {
-		this.messageService.show(Severity.Error, types.isString(error) ? new Error(error) : error);
-	}
-
-	public layout(dimension: Dimension): Dimension[] {
-
-		// Pass to super
-		let sizes = super.layout(dimension);
-
-		// Pass Contentsize to viewlet
-		this.contentAreaSize = sizes[1];
-		if (this.activeViewlet) {
-			this.activeViewlet.layout(this.contentAreaSize);
-		}
-
-		return sizes;
-	}
-
-	public shutdown(): void {
-		this.instantiatedViewlets.forEach(i => i.shutdown());
-
-		super.shutdown();
-	}
-
-	public dispose(): void {
-		this.mapViewletToViewletContainer = null;
-		this.mapProgressServiceToViewlet = null;
-		this.mapActionsBindingToViewlet = null;
-
-		for (let i = 0; i < this.instantiatedViewlets.length; i++) {
-			this.instantiatedViewlets[i].dispose();
-		}
-
-		this.instantiatedViewlets = [];
-
-		while (this.activeViewletListeners.length) {
-			this.activeViewletListeners.pop()();
-		}
-
-		while (this.instantiatedViewletListeners.length) {
-			this.instantiatedViewletListeners.pop()();
-		}
-
-		this.progressBar.dispose();
-		this.toolBar.dispose();
-
-		// Super Dispose
-		super.dispose();
+	toJSON(): object {
+		return {
+			type: Parts.SIDEBAR_PART
+		};
 	}
 }
 
-export class FocusSideBarAction extends Action {
+class FocusSideBarAction extends Action {
 
-	public static ID = 'workbench.action.focusSideBar';
-	public static LABEL = nls.localize('focusSideBar', "Focus into Side Bar");
+	static readonly ID = 'workbench.action.focusSideBar';
+	static readonly LABEL = nls.localize('focusSideBar', "Focus into Side Bar");
 
 	constructor(
 		id: string,
 		label: string,
-		@IViewletService private viewletService: IViewletService,
-		@IPartService private partService: IPartService
+		@IViewletService private readonly viewletService: IViewletService,
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService
 	) {
 		super(id, label);
 	}
 
-	public run(): TPromise<boolean> {
+	run(): Promise<any> {
 
 		// Show side bar
-		if (this.partService.isSideBarHidden()) {
-			this.partService.setSideBarHidden(false);
+		if (!this.layoutService.isVisible(Parts.SIDEBAR_PART)) {
+			return Promise.resolve(this.layoutService.setSideBarHidden(false));
 		}
 
 		// Focus into active viewlet
-		else {
-			let viewlet = this.viewletService.getActiveViewlet();
-			if (viewlet) {
-				viewlet.focus();
-			}
+		const viewlet = this.viewletService.getActiveViewlet();
+		if (viewlet) {
+			viewlet.focus();
 		}
 
-		return TPromise.as(true);
+		return Promise.resolve(true);
 	}
 }
 
-let registry = <IWorkbenchActionRegistry>Registry.as(ActionExtensions.WorkbenchActions);
-registry.registerWorkbenchAction(new SyncActionDescriptor(FocusSideBarAction, FocusSideBarAction.ID, FocusSideBarAction.LABEL, {
+const registry = Registry.as<IWorkbenchActionRegistry>(ActionExtensions.WorkbenchActions);
+registry.registerWorkbenchAction(SyncActionDescriptor.create(FocusSideBarAction, FocusSideBarAction.ID, FocusSideBarAction.LABEL, {
 	primary: KeyMod.CtrlCmd | KeyCode.KEY_0
-}), nls.localize('viewCategory', "View"));
+}), 'View: Focus into Side Bar', nls.localize('viewCategory', "View"));
+
+registerSingleton(IViewletService, SidebarPart);

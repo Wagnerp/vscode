@@ -3,8 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-.vs .quick-open-widget .quick-open-tree .quick-open-entry .quick-open-entry-icon.none,
-.vs-dark .quick-open-widget .quick-open-tree .quick-open-entry .quick-open-entry-icon.none {
+.vs .monaco-workbench .monaco-quick-open-widget .quick-open-tree .quick-open-entry .quick-open-entry-icon.none,
+.vs-dark .monaco-workbench .monaco-quick-open-widget .quick-open-tree .quick-open-entry .quick-open-entry-icon.none {
 	width: 16px;
 	background: none;
+}
+
+.monaco-workbench .monaco-quick-open-widget .quick-open-tree .quick-open-entry .quick-open-entry-icon.dirty {
+	width: 14px;
+	height: 18px;
 }

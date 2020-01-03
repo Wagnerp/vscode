@@ -1,15 +1,33 @@
 {
+	"extends": "./tsconfig.base.json",
 	"compilerOptions": {
-		"module": "amd",
-		"noImplicitAny": false,
 		"removeComments": false,
 		"preserveConstEnums": true,
-		"target": "ES5",
 		"sourceMap": false,
-		"experimentalDecorators": true
+		"outDir": "../out",
+		"target": "es2017",
+		"lib": [
+			"dom",
+			"es5",
+			"es2015.iterable"
+		],
+		"types": [
+			"keytar",
+			"mocha",
+			"semver",
+			"sinon",
+			"winreg"
+		]
 	},
+	"include": [
+		"./typings",
+		"./vs"
+	],
 	"exclude": [
-		"vs/languages/typescript/common/lib/lib.es6.d.ts",
-		"vs/languages/typescript/common/lib/lib.d.ts"
+		"./typings/es6-promise.d.ts",
+		"./typings/require-monaco.d.ts",
+		"./typings/xterm.d.ts",
+		"./typings/xterm-addon-search.d.ts",
+		"./typings/xterm-addon-web-links.d.ts"
 	]
 }

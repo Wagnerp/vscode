@@ -3,16 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
-import Event, {Emitter} from 'vs/base/common/event';
-import {TPromise} from 'vs/base/common/winjs.base';
-import {IDisposable} from 'vs/base/common/lifecycle';
-import URI from 'vs/base/common/uri';
-import {binarySearch} from 'vs/base/common/arrays';
-import {IPosition, IModel} from 'vs/editor/common/editorCommon';
-import {IDeclarationSupport, ILineContext, IReference} from 'vs/editor/common/modes';
-import {LanguageSelector, ModelLike, score} from 'vs/editor/common/modes/languageSelector';
+import { Emitter, Event } from 'vs/base/common/event';
+import { IDisposable, toDisposable } from 'vs/base/common/lifecycle';
+import { ITextModel } from 'vs/editor/common/model';
+import { LanguageSelector, score } from 'vs/editor/common/modes/languageSelector';
+import { shouldSynchronizeModel } from 'vs/editor/common/services/modelService';
 
 interface Entry<T> {
 	selector: LanguageSelector;
@@ -21,84 +16,86 @@ interface Entry<T> {
 	_time: number;
 }
 
-export default class LanguageFeatureRegistry<T> {
-
-	private _entries: Entry<T>[] = [];
-	private _onDidChange = new Emitter<number>();
-	private _supportName: string;
-
-	constructor(supportName?: string) {
-		this._supportName = supportName;
+function isExclusive(selector: LanguageSelector): boolean {
+	if (typeof selector === 'string') {
+		return false;
+	} else if (Array.isArray(selector)) {
+		return selector.every(isExclusive);
+	} else {
+		return !!selector.exclusive;
 	}
+}
 
-	get onDidChange():Event<number> {
+export class LanguageFeatureRegistry<T> {
+
+	private _clock: number = 0;
+	private readonly _entries: Entry<T>[] = [];
+	private readonly _onDidChange = new Emitter<number>();
+
+	get onDidChange(): Event<number> {
 		return this._onDidChange.event;
 	}
 
 	register(selector: LanguageSelector, provider: T): IDisposable {
 
-		let entry: Entry<T> = {
+		let entry: Entry<T> | undefined = {
 			selector,
 			provider,
 			_score: -1,
-			_time: Date.now()
+			_time: this._clock++
 		};
 
 		this._entries.push(entry);
-		this._candidate = undefined;
+		this._lastCandidate = undefined;
 		this._onDidChange.fire(this._entries.length);
 
-		return {
-			dispose: () => {
-				if (entry) {
-					let idx = this._entries.indexOf(entry);
-					if (idx >= 0) {
-						this._entries.splice(idx, 1);
-						this._candidate = undefined;
-						this._onDidChange.fire(this._entries.length);
-						entry = undefined;
-					}
+		return toDisposable(() => {
+			if (entry) {
+				let idx = this._entries.indexOf(entry);
+				if (idx >= 0) {
+					this._entries.splice(idx, 1);
+					this._lastCandidate = undefined;
+					this._onDidChange.fire(this._entries.length);
+					entry = undefined;
 				}
 			}
-		}
+		});
 	}
 
-	has(model: IModel): boolean {
+	has(model: ITextModel): boolean {
 		return this.all(model).length > 0;
 	}
 
-	all(model: IModel | ModelLike): T[]{
-		let result: T[] = [];
-		if (model) {
-			this._updateScores(model);
-			// from registry
-			for (let entry of this._entries) {
-				if (entry._score > 0) {
-					result.push(entry.provider);
-				}
-			}
-			// from mode
-			if (isModel(model)) {
-				if (model.getMode() && model.getMode()[this._supportName]) {
-					result.push(model.getMode()[this._supportName]);
-				}
+	all(model: ITextModel): T[] {
+		if (!model) {
+			return [];
+		}
+
+		this._updateScores(model);
+		const result: T[] = [];
+
+		// from registry
+		for (let entry of this._entries) {
+			if (entry._score > 0) {
+				result.push(entry.provider);
 			}
 		}
+
 		return result;
 	}
 
-	ordered(model: IModel|ModelLike): T[] {
-		let entries = this._orderedEntries(model);
-		return entries.map(item => item.provider);
+	ordered(model: ITextModel): T[] {
+		const result: T[] = [];
+		this._orderedForEach(model, entry => result.push(entry.provider));
+		return result;
 	}
 
-	orderedGroups(model: IModel | ModelLike): T[][] {
-		let entries = this._orderedEntries(model);
-		let result: T[][] = [];
+	orderedGroups(model: ITextModel): T[][] {
+		const result: T[][] = [];
 		let lastBucket: T[];
 		let lastBucketScore: number;
 
-		for (let entry of entries) {
+		this._orderedForEach(model, entry => {
 			if (lastBucket && lastBucketScore === entry._score) {
 				lastBucket.push(entry.provider);
 			} else {
@@ -106,75 +103,60 @@ export default class LanguageFeatureRegistry<T> {
 				lastBucket = [entry.provider];
 				result.push(lastBucket);
 			}
-		}
+		});
 
 		return result;
 	}
 
-	private _orderedEntries(model: IModel | ModelLike): Entry<T>[] {
-		let result: Entry<T>[] = [];
-		if (model) {
-			if (this._updateScores(model)) {
-				this._sortByScore();
-			}
+	private _orderedForEach(model: ITextModel, callback: (provider: Entry<T>) => any): void {
 
-			// from registry
-			for (let entry of this._entries) {
-				if (entry._score > 0) {
-					result.push(entry);
-				}
-			}
+		if (!model) {
+			return;
+		}
 
-			// from mode
-			if (isModel(model)) {
-				if (model.getMode() && model.getMode()[this._supportName]) {
+		this._updateScores(model);
 
-					let entry: Entry<T> = {
-						selector: undefined,
-						provider: model.getMode()[this._supportName],
-						_score: .5,
-						_time: 0
-					};
-
-					let idx = binarySearch(result, entry, LanguageFeatureRegistry._compareByScoreAndTime);
-					result.splice(idx < 0 ? ~idx : idx, 0, entry);
-				}
+		for (const entry of this._entries) {
+			if (entry._score > 0) {
+				callback(entry);
 			}
 		}
-		return result;
 	}
 
-	private _candidate: ModelLike;
+	private _lastCandidate: { uri: string; language: string; } | undefined;
 
-	private _updateScores(model: IModel|ModelLike): boolean {
+	private _updateScores(model: ITextModel): void {
 
-		let candidate: ModelLike;
-		if (isModel(model)) {
-			candidate = {
-				uri: model.getAssociatedResource(),
-				language: model.getModeId()
-			};
-		} else {
-			candidate = model;
-		}
+		let candidate = {
+			uri: model.uri.toString(),
+			language: model.getLanguageIdentifier().language
+		};
 
-		if (this._candidate
-			&& this._candidate.language === candidate.language
-			&& this._candidate.uri.toString() === candidate.uri.toString()) {
+		if (this._lastCandidate
+			&& this._lastCandidate.language === candidate.language
+			&& this._lastCandidate.uri === candidate.uri) {
 
 			// nothing has changed
 			return;
 		}
 
-		this._candidate = candidate;
+		this._lastCandidate = candidate;
 
 		for (let entry of this._entries) {
-			entry._score = score(entry.selector, this._candidate);
-		}
-		return true;
-	}
+			entry._score = score(entry.selector, model.uri, model.getLanguageIdentifier().language, shouldSynchronizeModel(model));
 
-	private _sortByScore(): void {
+			if (isExclusive(entry.selector) && entry._score > 0) {
+				// support for one exclusive selector that overwrites
+				// any other selector
+				for (let entry of this._entries) {
+					entry._score = 0;
+				}
+				entry._score = 1000;
+				break;
+			}
+		}
+
+		// needs sorting
 		this._entries.sort(LanguageFeatureRegistry._compareByScoreAndTime);
 	}
 
@@ -183,7 +165,7 @@ export default class LanguageFeatureRegistry<T> {
 			return 1;
 		} else if (a._score > b._score) {
 			return -1;
-		} else if(a._time < b._time){
+		} else if (a._time < b._time) {
 			return 1;
 		} else if (a._time > b._time) {
 			return -1;
@@ -191,8 +173,4 @@ export default class LanguageFeatureRegistry<T> {
 			return 0;
 		}
 	}
-}
-
-function isModel(thing: any): thing is IModel {
-	return typeof thing['getMode'] === 'function';
 }

@@ -1,14 +1,19 @@
 {
 	"name": "theme-monokai",
-	"version": "0.1.0",
+	"displayName": "%displayName%",
+	"description": "%description%",
+	"version": "1.0.0",
 	"publisher": "vscode",
-	"engines": { "vscode": "*" },
+	"license": "MIT",
+	"engines": {
+		"vscode": "*"
+	},
 	"contributes": {
 		"themes": [
 			{
 				"label": "Monokai",
 				"uiTheme": "vs-dark",
-				"path": "./themes/Monokai.tmTheme"
+				"path": "./themes/monokai-color-theme.json"
 			}
 		]
 	}

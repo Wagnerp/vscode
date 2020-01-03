@@ -3,22 +3,22 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-/*global process,__dirname,define,run,suite,test*/
+/*eslint-env mocha*/
+/*global define,run*/
 
-var assert = require('assert');
-var path = require('path');
-var glob = require('glob');
-var istanbul = require('istanbul');
-var jsdom = require('jsdom-no-contextify');
-var minimatch = require('minimatch');
-var async = require('async');
-var TEST_GLOB = '**/test/**/*.test.js';
+const assert = require('assert');
+const path = require('path');
+const glob = require('glob');
+const jsdom = require('jsdom-no-contextify');
+const TEST_GLOB = '**/test/**/*.test.js';
+const coverage = require('./coverage');
 
 var optimist = require('optimist')
 	.usage('Run the Code tests. All mocha options apply.')
 	.describe('build', 'Run from out-build').boolean('build')
 	.describe('run', 'Run a single file').string('run')
 	.describe('coverage', 'Generate a coverage report').boolean('coverage')
+	.describe('only-monaco-editor', 'Run only monaco editor tests').boolean('only-monaco-editor')
 	.describe('browser', 'Run tests in a browser').boolean('browser')
 	.alias('h', 'help').boolean('h')
 	.describe('h', 'Show help');
@@ -34,43 +34,6 @@ var out = argv.build ? 'out-build' : 'out';
 var loader = require('../' + out + '/vs/loader');
 var src = path.join(path.dirname(__dirname), out);
 
-function loadSingleTest(test) {
-	var moduleId = path.relative(src, path.resolve(test)).replace(/\.js$/, '');
-
-	return function (cb) {
-		define([moduleId], function () {
-			cb(null);
-		});
-	};
-}
-
-function loadClientTests(cb) {
-	glob(TEST_GLOB, { cwd: src }, function (err, files) {
-		var modules = files.map(function (file) {
-			return file.replace(/\.js$/, '');
-		});
-
-		// load all modules
-		define(modules, function () {
-			cb(null);
-		});
-	});
-}
-
-function loadPluginTests(cb) {
-	var root = path.join(path.dirname(__dirname), 'extensions');
-	glob(TEST_GLOB, { cwd: root }, function (err, files) {
-
-		var modules = files.map(function (file) {
-			return 'extensions/' + file.replace(/\.js$/, '');
-		});
-
-		define(modules, function() {
-			cb();
-		});
-	});
-}
-
 function main() {
 	process.on('uncaughtException', function (e) {
 		console.error(e.stack || e);
@@ -79,37 +42,24 @@ function main() {
 	var loaderConfig = {
 		nodeRequire: require,
 		nodeMain: __filename,
-		baseUrl: path.join(path.dirname(__dirname)),
+		baseUrl: path.join(path.dirname(__dirname), 'src'),
 		paths: {
-			'vs': out + '/vs',
-			'lib': out + '/lib',
-			'bootstrap': out + '/bootstrap'
+			'vs/css': '../test/css.mock',
+			'vs': `../${out}/vs`,
+			'lib': `../${out}/lib`,
+			'bootstrap-fork': `../${out}/bootstrap-fork`
 		},
 		catchError: true
 	};
 
 	if (argv.coverage) {
-		var instrumenter = new istanbul.Instrumenter();
-
-		loaderConfig.nodeInstrumenter = function (contents, source) {
-			if (minimatch(source, TEST_GLOB)) {
-				return contents;
-			}
-
-			return instrumenter.instrumentSync(contents, source);
-		};
+		coverage.initialize(loaderConfig);
 
 		process.on('exit', function (code) {
 			if (code !== 0) {
 				return;
 			}
-
-			var collector = new istanbul.Collector();
-			collector.add(global.__coverage__);
-
-			var reporter = new istanbul.Reporter(null, path.join(path.dirname(path.dirname(__dirname)), 'Code-Coverage'));
-			reporter.add('html');
-			reporter.write(collector, true, function () {});
+			coverage.createReport(argv.run || argv.runGlob);
 		});
 	}
 
@@ -132,23 +82,75 @@ function main() {
 		write.apply(process.stderr, arguments);
 	};
 
-	var loadTasks = [];
+	var loadFunc = null;
 
-	if (argv.run) {
+	if (argv.runGlob) {
+		loadFunc = cb => {
+			const doRun = tests => {
+				const modulesToLoad = tests.map(test => {
+					if (path.isAbsolute(test)) {
+						test = path.relative(src, path.resolve(test));
+					}
+
+					return test.replace(/(\.js)|(\.d\.ts)|(\.js\.map)$/, '');
+				});
+				define(modulesToLoad, () => cb(null), cb);
+			};
+
+			glob(argv.runGlob, { cwd: src }, function (err, files) { doRun(files); });
+		};
+	} else if (argv.run) {
 		var tests = (typeof argv.run === 'string') ? [argv.run] : argv.run;
-
-		loadTasks = loadTasks.concat(tests.map(function (test) {
-			return loadSingleTest(test);
-		}));
+		var modulesToLoad = tests.map(function (test) {
+			test = test.replace(/^src/, 'out');
+			test = test.replace(/\.ts$/, '.js');
+			return path.relative(src, path.resolve(test)).replace(/(\.js)|(\.js\.map)$/, '').replace(/\\/g, '/');
+		});
+		loadFunc = cb => {
+			define(modulesToLoad, () => cb(null), cb);
+		};
+	} else if (argv['only-monaco-editor']) {
+		loadFunc = function (cb) {
+			glob(TEST_GLOB, { cwd: src }, function (err, files) {
+				var modulesToLoad = files.map(function (file) {
+					return file.replace(/\.js$/, '');
+				});
+				modulesToLoad = modulesToLoad.filter(function (module) {
+					if (/^vs\/workbench\//.test(module)) {
+						return false;
+					}
+					// platform tests drag in the workbench.
+					// see https://github.com/Microsoft/vscode/commit/12eaba2f64c69247de105c3d9c47308ac6e44bc9
+					// and cry a little
+					if (/^vs\/platform\//.test(module)) {
+						return false;
+					}
+					return !/(\/|\\)node(\/|\\)/.test(module);
+				});
+				console.log(JSON.stringify(modulesToLoad, null, '\t'));
+				define(modulesToLoad, function () { cb(null); }, cb);
+			});
+		};
 	} else {
-		loadTasks.push(loadClientTests);
-		loadTasks.push(loadPluginTests);
+		loadFunc = function (cb) {
+			glob(TEST_GLOB, { cwd: src }, function (err, files) {
+				var modulesToLoad = files.map(function (file) {
+					return file.replace(/\.js$/, '');
+				});
+				define(modulesToLoad, function () { cb(null); }, cb);
+			});
+		};
 	}
 
-	async.parallel(loadTasks, function () {
+	loadFunc(function (err) {
+		if (err) {
+			console.error(err);
+			return process.exit(1);
+		}
+
 		process.stderr.write = write;
 
-		if (!argv.run) {
+		if (!argv.run && !argv.runGlob) {
 			// set up last test
 			suite('Loader', function () {
 				test('should not explode while loading', function () {
@@ -157,8 +159,31 @@ function main() {
 			});
 		}
 
-		// fire up mocha
-		run();
+		// report failing test for every unexpected error during any of the tests
+		var unexpectedErrors = [];
+		suite('Errors', function () {
+			test('should not have unexpected errors in tests', function () {
+				if (unexpectedErrors.length) {
+					unexpectedErrors.forEach(function (stack) {
+						console.error('');
+						console.error(stack);
+					});
+
+					assert.ok(false);
+				}
+			});
+		});
+
+		// replace the default unexpected error handler to be useful during tests
+		loader(['vs/base/common/errors'], function (errors) {
+			errors.setUnexpectedErrorHandler(function (err) {
+				let stack = (err && err.stack) || (new Error().stack);
+				unexpectedErrors.push((err && err.message ? err.message : err) + '\n' + stack);
+			});
+
+			// fire up mocha
+			run();
+		});
 	});
 }
 

@@ -2,88 +2,46 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import Lifecycle = require('vs/base/common/lifecycle');
-import Timer = require('vs/base/common/timer');
-import {createDecorator, ServiceIdentifier, IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
+import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
+import { ClassifiedEvent, StrictPropertyCheck, GDPRClassification } from 'vs/platform/telemetry/common/gdprTypings';
 
-export var ID = 'telemetryService';
-
-export var ITelemetryService = createDecorator<ITelemetryService>(ID);
+export const ITelemetryService = createDecorator<ITelemetryService>('telemetryService');
 
 export interface ITelemetryInfo {
-		sessionId: string;
-		machineId: string;
-		instanceId: string;
+	sessionId: string;
+	machineId: string;
+	instanceId: string;
+	msftInternal?: boolean;
 }
 
-export interface ITelemetryService extends Lifecycle.IDisposable {
-	serviceId : ServiceIdentifier<any>;
+export interface ITelemetryData {
+	from?: string;
+	target?: string;
+	[key: string]: any;
+}
+
+export interface ITelemetryService {
+
+	_serviceBrand: undefined;
 
 	/**
 	 * Sends a telemetry event that has been privacy approved.
 	 * Do not call this unless you have been given approval.
 	 */
-	publicLog(eventName: string, data?: any):void;
+	publicLog(eventName: string, data?: ITelemetryData, anonymizeFilePaths?: boolean): Promise<void>;
 
-	/**
-	 * Starts a telemetry timer. Call stop() to send the event.
-	 */
-	start(name:string, data?:any):Timer.ITimerEvent;
+	publicLog2<E extends ClassifiedEvent<T> = never, T extends GDPRClassification<T> = never>(eventName: string, data?: StrictPropertyCheck<T, E>, anonymizeFilePaths?: boolean): Promise<void>;
 
-	/**
-	 * Session Id
-	 */
-	getSessionId(): string;
+	setEnabled(value: boolean): void;
 
-	/**
-	 * a unique Id that is not hardware specific
-	 */
-	getInstanceId(): string;
+	getTelemetryInfo(): Promise<ITelemetryInfo>;
 
-	/**
-	 * a hardware specific machine Id
-	 */
-	getMachineId(): string;
-
-	getTelemetryInfo(): Thenable<ITelemetryInfo>;
-
-	/**
-	 * Appender operations
-	 */
-	getAppendersCount(): number;
-	getAppenders(): ITelemetryAppender[];
-	addTelemetryAppender(appender: ITelemetryAppender): void;
-	removeTelemetryAppender(appender: ITelemetryAppender): void;
-	setInstantiationService(instantiationService: IInstantiationService): void;
+	isOptedIn: boolean;
 }
 
-export interface ITelemetryAppender extends Lifecycle.IDisposable {
-	log(eventName: string, data?: any): void;
-}
-
-export function anonymize(input: string): string {
-	if (!input) {
-		return input;
-	}
-
-	var r = '';
-	for (var i = 0; i < input.length; i++) {
-		var ch = input[i];
-		if (ch >= '0' && ch <= '9') {
-			r += '0';
-			continue;
-		}
-		if (ch >= 'a' && ch <= 'z') {
-			r += 'a';
-			continue;
-		}
-		if (ch >= 'A' && ch <= 'Z') {
-			r += 'A';
-			continue;
-		}
-		r += ch;
-	}
-	return r;
-}
+// Keys
+export const instanceStorageKey = 'telemetry.instanceId';
+export const currentSessionDateStorageKey = 'telemetry.currentSessionDate';
+export const firstSessionDateStorageKey = 'telemetry.firstSessionDate';
+export const lastSessionDateStorageKey = 'telemetry.lastSessionDate';

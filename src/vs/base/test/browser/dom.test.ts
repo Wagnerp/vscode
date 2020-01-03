@@ -2,15 +2,15 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
 import * as assert from 'assert';
-import dom = require('vs/base/browser/dom');
+import * as dom from 'vs/base/browser/dom';
+const $ = dom.$;
 
 suite('dom', () => {
 	test('hasClass', () => {
 
-		var element = document.createElement('div');
+		let element = document.createElement('div');
 		element.className = 'foobar boo far';
 
 		assert(dom.hasClass(element, 'foobar'));
@@ -23,7 +23,7 @@ suite('dom', () => {
 
 	test('removeClass', () => {
 
-		var element = document.createElement('div');
+		let element = document.createElement('div');
 		element.className = 'foobar boo far';
 
 		dom.removeClass(element, 'boo');
@@ -55,9 +55,11 @@ suite('dom', () => {
 	});
 
 	test('removeClass should consider hyphens', function () {
-		var element = document.createElement('div');
+		let element = document.createElement('div');
 
-		dom.addClass(element, 'foo-bar bar');
+		dom.addClass(element, 'foo-bar');
+		dom.addClass(element, 'bar');
+
 		assert(dom.hasClass(element, 'foo-bar'));
 		assert(dom.hasClass(element, 'bar'));
 
@@ -72,8 +74,8 @@ suite('dom', () => {
 
 	//test('[perf] hasClass * 100000', () => {
 	//
-	//	for (var i = 0; i < 100000; i++) {
-	//		var element = document.createElement('div');
+	//	for (let i = 0; i < 100000; i++) {
+	//		let element = document.createElement('div');
 	//		element.className = 'foobar boo far';
 	//
 	//		assert(dom.hasClass(element, 'far'));
@@ -82,79 +84,32 @@ suite('dom', () => {
 	//	}
 	//});
 
-	test('removeScriptTags', function () {
-		var input = "<div>test</div>";
-		assert(dom.removeScriptTags(input) === input);
+	suite('$', () => {
+		test('should build simple nodes', () => {
+			const div = $('div');
+			assert(div);
+			assert(div instanceof HTMLElement);
+			assert.equal(div.tagName, 'DIV');
+			assert(!div.firstChild);
+		});
 
-		var inputWithScript = "<div>test<script>window.alert('foo');</script></div>";
-		assert(dom.removeScriptTags(inputWithScript) === "<div>test</div>");
-	});
+		test('should build nodes with attributes', () => {
+			let div = $('div', { class: 'test' });
+			assert.equal(div.className, 'test');
 
-	test('safeStringify', function() {
-		var obj1 = {
-			friend: null
-		};
+			div = $('div', undefined);
+			assert.equal(div.className, '');
+		});
 
-		var obj2 = {
-			friend: null
-		};
+		test('should build nodes with children', () => {
+			let div = $('div', undefined, $('span', { id: 'demospan' }));
+			let firstChild = div.firstChild as HTMLElement;
+			assert.equal(firstChild.tagName, 'SPAN');
+			assert.equal(firstChild.id, 'demospan');
 
-		obj1.friend = obj2;
-		obj2.friend = obj1;
+			div = $('div', undefined, 'hello');
 
-		var arr:any = [1];
-		arr.push(arr);
-
-		var circular = {
-			a: 42,
-			b: null,
-			c: [
-				obj1, obj2
-			],
-			d: null
-		};
-
-		arr.push(circular);
-		circular.b = circular;
-		circular.d = arr;
-
-		var result = dom.safeStringifyDOMAware(circular);
-
-		assert.deepEqual(JSON.parse(result), {
-			a: 42,
-			b: '[Circular]',
-			c: [
-				{friend: {
-					friend: '[Circular]'
-				}},
-				'[Circular]'
-			],
-			d: [1, '[Circular]', '[Circular]']
+			assert.equal(div.firstChild && div.firstChild.textContent, 'hello');
 		});
 	});
-
-	test('safeStringify2', function() {
-		var obj:any = {
-			a: null,
-			b: document.createElement('div'),
-			c: null,
-			d: 'string',
-			e: 'string',
-			f: 42,
-			g: 42
-		};
-
-		var result = dom.safeStringifyDOMAware(obj);
-
-		assert.deepEqual(JSON.parse(result), {
-			a: null,
-			b: '[Element]',
-			c: null,
-			d: 'string',
-			e: 'string',
-			f: 42,
-			g: 42
-		});
-	});
-
 });

@@ -3,16 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-
-'use strict';
-
 import 'vs/css!./contextview';
-import Builder = require('vs/base/browser/builder');
-import DOM = require('vs/base/browser/dom');
-import Lifecycle = require('vs/base/common/lifecycle');
-import EventEmitter = require('vs/base/common/eventEmitter');
-
-var $ = Builder.$;
+import * as DOM from 'vs/base/browser/dom';
+import * as platform from 'vs/base/common/platform';
+import { IDisposable, toDisposable, Disposable, DisposableStore } from 'vs/base/common/lifecycle';
+import { Range } from 'vs/base/common/range';
+import { BrowserFeatures } from 'vs/base/browser/canIUse';
 
 export interface IAnchor {
 	x: number;
@@ -21,29 +17,30 @@ export interface IAnchor {
 	height?: number;
 }
 
-export enum AnchorAlignment {
+export const enum AnchorAlignment {
 	LEFT, RIGHT
 }
 
-export enum AnchorPosition {
+export const enum AnchorPosition {
 	BELOW, ABOVE
 }
 
 export interface IDelegate {
-	getAnchor(): HTMLElement|IAnchor;
-	render(container: HTMLElement): Lifecycle.IDisposable;
+	getAnchor(): HTMLElement | IAnchor;
+	render(container: HTMLElement): IDisposable | null;
+	focus?(): void;
 	layout?(): void;
-	anchorAlignment?:AnchorAlignment; // default: left
-	anchorPosition?:AnchorPosition; // default: below
-	canRelayout?:boolean; // default: true
-	onDOMEvent?(e:Event, activeElement: HTMLElement):void;
-	onHide?(data?: any):void;
+	anchorAlignment?: AnchorAlignment; // default: left
+	anchorPosition?: AnchorPosition; // default: below
+	canRelayout?: boolean; // default: true
+	onDOMEvent?(e: Event, activeElement: HTMLElement): void;
+	onHide?(data?: any): void;
 }
 
 export interface IContextViewProvider {
 	showContextView(delegate: IDelegate): void;
 	hideContextView(): void;
-	layout():void;
+	layout(): void;
 }
 
 export interface IPosition {
@@ -58,201 +55,242 @@ export interface ISize {
 
 export interface IView extends IPosition, ISize { }
 
-export function layout(view: ISize, around: IView, inside: IView, anchorPosition: AnchorPosition, anchorAlignment: AnchorAlignment) : IPosition {
-	var top: number, left: number;
-
-	if (anchorPosition === AnchorPosition.BELOW) {
-		top = around.top + around.height - inside.top;
-		if (inside.top + top + view.height > inside.height && around.top - inside.top > view.height) {
-			top = around.top - view.height - inside.top;
-		}
-	} else {
-		top = around.top - view.height - inside.top;
-		if (top + inside.top < 0 && around.top + around.height + view.height - inside.top < inside.height) {
-			top = around.top + around.height - inside.top;
-		}
-	}
-
-	if (anchorAlignment === AnchorAlignment.LEFT) {
-		left = around.left - inside.left;
-		if (inside.left + left + view.width > inside.width) {
-			left -= view.width - around.width;
-		}
-	} else {
-		left = around.left + around.width - view.width - inside.left;
-		if (left + inside.left < 0 && around.left + view.width < inside.width) {
-			left = around.left - inside.left;
-		}
-	}
-
-	return { top: top, left: left };
+export const enum LayoutAnchorPosition {
+	Before,
+	After
 }
 
-export class ContextView extends EventEmitter.EventEmitter {
+export interface ILayoutAnchor {
+	offset: number;
+	size: number;
+	position: LayoutAnchorPosition;
+}
 
-	private static BUBBLE_UP_EVENTS = ['click', 'keydown', 'focus', 'blur'];
-	private static BUBBLE_DOWN_EVENTS = ['click'];
+/**
+ * Lays out a one dimensional view next to an anchor in a viewport.
+ *
+ * @returns The view offset within the viewport.
+ */
+export function layout(viewportSize: number, viewSize: number, anchor: ILayoutAnchor): number {
+	const anchorEnd = anchor.offset + anchor.size;
 
-	private $container: Builder.Builder;
-	private $view: Builder.Builder;
-	private delegate: IDelegate;
-	private toDispose: Lifecycle.IDisposable[];
-	private toDisposeOnClean: Lifecycle.IDisposable;
+	if (anchor.position === LayoutAnchorPosition.Before) {
+		if (viewSize <= viewportSize - anchorEnd) {
+			return anchorEnd; // happy case, lay it out after the anchor
+		}
+
+		if (viewSize <= anchor.offset) {
+			return anchor.offset - viewSize; // ok case, lay it out before the anchor
+		}
+
+		return Math.max(viewportSize - viewSize, 0); // sad case, lay it over the anchor
+	} else {
+		if (viewSize <= anchor.offset) {
+			return anchor.offset - viewSize; // happy case, lay it out before the anchor
+		}
+
+		if (viewSize <= viewportSize - anchorEnd) {
+			return anchorEnd; // ok case, lay it out after the anchor
+		}
+
+		return 0; // sad case, lay it over the anchor
+	}
+}
+
+export class ContextView extends Disposable {
+
+	private static readonly BUBBLE_UP_EVENTS = ['click', 'keydown', 'focus', 'blur'];
+	private static readonly BUBBLE_DOWN_EVENTS = ['click'];
+
+	private container: HTMLElement | null = null;
+	private view: HTMLElement;
+	private delegate: IDelegate | null = null;
+	private toDisposeOnClean: IDisposable = Disposable.None;
+	private toDisposeOnSetContainer: IDisposable = Disposable.None;
 
 	constructor(container: HTMLElement) {
 		super();
-		this.$view = $('.context-view').hide();
+
+		this.view = DOM.$('.context-view');
+
+		DOM.hide(this.view);
+
 		this.setContainer(container);
 
-		this.toDispose = [{
-			dispose: () => {
-				this.setContainer(null);
-			}
-		}];
-
-		this.toDisposeOnClean = null;
+		this._register(toDisposable(() => this.setContainer(null)));
 	}
 
-	public setContainer(container: HTMLElement): void {
-		if (this.$container) {
-			this.$container.off(ContextView.BUBBLE_UP_EVENTS);
-			this.$container.off(ContextView.BUBBLE_DOWN_EVENTS, true);
-			this.$container = null;
+	setContainer(container: HTMLElement | null): void {
+		if (this.container) {
+			this.toDisposeOnSetContainer.dispose();
+			this.container.removeChild(this.view);
+			this.container = null;
 		}
 		if (container) {
-			this.$container = $(container);
-			this.$view.appendTo(this.$container);
-			this.$container.on(ContextView.BUBBLE_UP_EVENTS, (e:Event) => {
-				this.onDOMEvent(e, <HTMLElement> document.activeElement, false);
+			this.container = container;
+			this.container.appendChild(this.view);
+
+			const toDisposeOnSetContainer = new DisposableStore();
+
+			ContextView.BUBBLE_UP_EVENTS.forEach(event => {
+				toDisposeOnSetContainer.add(DOM.addStandardDisposableListener(this.container!, event, (e: Event) => {
+					this.onDOMEvent(e, false);
+				}));
 			});
-			this.$container.on(ContextView.BUBBLE_DOWN_EVENTS, (e:Event) => {
-				this.onDOMEvent(e, <HTMLElement> document.activeElement, true);
-			}, null, true);
+
+			ContextView.BUBBLE_DOWN_EVENTS.forEach(event => {
+				toDisposeOnSetContainer.add(DOM.addStandardDisposableListener(this.container!, event, (e: Event) => {
+					this.onDOMEvent(e, true);
+				}, true));
+			});
+
+			this.toDisposeOnSetContainer = toDisposeOnSetContainer;
 		}
 	}
 
-	public show(delegate: IDelegate): void {
+	show(delegate: IDelegate): void {
 		if (this.isVisible()) {
 			this.hide();
 		}
 
 		// Show static box
-		this.$view.setClass('context-view').empty().style({ top: '0px', left: '0px' }).show();
+		DOM.clearNode(this.view);
+		this.view.className = 'context-view';
+		this.view.style.top = '0px';
+		this.view.style.left = '0px';
+		DOM.show(this.view);
 
 		// Render content
-		this.toDisposeOnClean = delegate.render(this.$view.getHTMLElement());
+		this.toDisposeOnClean = delegate.render(this.view) || Disposable.None;
 
 		// Set active delegate
 		this.delegate = delegate;
 
 		// Layout
 		this.doLayout();
+
+		// Focus
+		if (this.delegate.focus) {
+			this.delegate.focus();
+		}
 	}
 
-	public layout(): void {
+	layout(): void {
 		if (!this.isVisible()) {
 			return;
 		}
 
-		if (this.delegate.canRelayout === false) {
+		if (this.delegate!.canRelayout === false && !(platform.isIOS && BrowserFeatures.pointerEvents)) {
 			this.hide();
 			return;
 		}
 
-		if (this.delegate.layout) {
-			this.delegate.layout();
+		if (this.delegate!.layout) {
+			this.delegate!.layout!();
 		}
 
 		this.doLayout();
 	}
 
 	private doLayout(): void {
+		// Check that we still have a delegate - this.delegate.layout may have hidden
+		if (!this.isVisible()) {
+			return;
+		}
+
 		// Get anchor
-		var anchor = this.delegate.getAnchor();
+		let anchor = this.delegate!.getAnchor();
 
 		// Compute around
-		var around: IView;
+		let around: IView;
 
 		// Get the element's position and size (to anchor the view)
 		if (DOM.isHTMLElement(anchor)) {
-			var $anchor = $(<HTMLElement> anchor);
-			var elementPosition = $anchor.getPosition();
-			var elementSize = $anchor.getTotalSize();
+			let elementPosition = DOM.getDomNodePagePosition(anchor);
 
 			around = {
 				top: elementPosition.top,
 				left: elementPosition.left,
-				width: elementSize.width,
-				height: elementSize.height
+				width: elementPosition.width,
+				height: elementPosition.height
 			};
 		} else {
-			var realAnchor = <IAnchor> anchor;
-
 			around = {
-				top: realAnchor.y,
-				left: realAnchor.x,
-				width: realAnchor.width || 0,
-				height: realAnchor.height || 0
+				top: anchor.y,
+				left: anchor.x,
+				width: anchor.width || 1,
+				height: anchor.height || 2
 			};
 		}
 
-		// Get the container's position
-		var insidePosition = this.$container.getPosition();
-		var inside = {
-			top: insidePosition.top,
-			left: insidePosition.left,
-			height: window.innerHeight,
-			width: window.innerWidth
-		};
+		const viewSizeWidth = DOM.getTotalWidth(this.view);
+		const viewSizeHeight = DOM.getTotalHeight(this.view);
 
-		// Get the view's size
-		var viewSize = this.$view.getTotalSize();
-		var view = { width: viewSize.width, height: viewSize.height };
+		const anchorPosition = this.delegate!.anchorPosition || AnchorPosition.BELOW;
+		const anchorAlignment = this.delegate!.anchorAlignment || AnchorAlignment.LEFT;
 
-		var anchorPosition = this.delegate.anchorPosition || AnchorPosition.BELOW;
-		var anchorAlignment = this.delegate.anchorAlignment || AnchorAlignment.LEFT;
+		const verticalAnchor: ILayoutAnchor = { offset: around.top - window.pageYOffset, size: around.height, position: anchorPosition === AnchorPosition.BELOW ? LayoutAnchorPosition.Before : LayoutAnchorPosition.After };
 
-		var result = layout(view, around, inside, anchorPosition, anchorAlignment);
+		let horizontalAnchor: ILayoutAnchor;
 
-		this.$view.removeClass('top', 'bottom', 'left', 'right');
-		this.$view.addClass(anchorPosition === AnchorPosition.BELOW ? 'bottom' : 'top');
-		this.$view.addClass(anchorAlignment === AnchorAlignment.LEFT ? 'left' : 'right');
-		this.$view.style({ top: result.top + 'px', left: result.left + 'px', width: 'initial' });
+		if (anchorAlignment === AnchorAlignment.LEFT) {
+			horizontalAnchor = { offset: around.left, size: 0, position: LayoutAnchorPosition.Before };
+		} else {
+			horizontalAnchor = { offset: around.left + around.width, size: 0, position: LayoutAnchorPosition.After };
+		}
+
+		const top = layout(window.innerHeight, viewSizeHeight, verticalAnchor) + window.pageYOffset;
+
+		// if view intersects vertically with anchor, shift it horizontally
+		if (Range.intersects({ start: top, end: top + viewSizeHeight }, { start: verticalAnchor.offset, end: verticalAnchor.offset + verticalAnchor.size })) {
+			horizontalAnchor.size = around.width;
+			if (anchorAlignment === AnchorAlignment.RIGHT) {
+				horizontalAnchor.offset = around.left;
+			}
+		}
+
+		const left = layout(window.innerWidth, viewSizeWidth, horizontalAnchor);
+
+		DOM.removeClasses(this.view, 'top', 'bottom', 'left', 'right');
+		DOM.addClass(this.view, anchorPosition === AnchorPosition.BELOW ? 'bottom' : 'top');
+		DOM.addClass(this.view, anchorAlignment === AnchorAlignment.LEFT ? 'left' : 'right');
+
+		const containerPosition = DOM.getDomNodePagePosition(this.container!);
+		this.view.style.top = `${top - containerPosition.top}px`;
+		this.view.style.left = `${left - containerPosition.left}px`;
+		this.view.style.width = 'initial';
 	}
 
-	public hide(data?: any): void {
-		if (this.delegate && this.delegate.onHide) {
-			this.delegate.onHide(data);
-		}
-
+	hide(data?: any): void {
+		const delegate = this.delegate;
 		this.delegate = null;
 
-		if (this.toDisposeOnClean) {
-			this.toDisposeOnClean.dispose();
-			this.toDisposeOnClean = null;
+		if (delegate?.onHide) {
+			delegate.onHide(data);
 		}
 
-		this.$view.hide();
+		this.toDisposeOnClean.dispose();
+
+		DOM.hide(this.view);
 	}
 
 	private isVisible(): boolean {
 		return !!this.delegate;
 	}
 
-	private onDOMEvent(e: Event, element: HTMLElement, onCapture: boolean): void {
+	private onDOMEvent(e: Event, onCapture: boolean): void {
 		if (this.delegate) {
 			if (this.delegate.onDOMEvent) {
-				this.delegate.onDOMEvent(e, <HTMLElement> document.activeElement);
-			} else if (onCapture && !DOM.isAncestor(<HTMLElement> e.target, this.$container.getHTMLElement())) {
+				this.delegate.onDOMEvent(e, <HTMLElement>document.activeElement);
+			} else if (onCapture && !DOM.isAncestor(<HTMLElement>e.target, this.container)) {
 				this.hide();
 			}
 		}
 	}
 
-	public dispose(): void {
-		super.dispose();
+	dispose(): void {
 		this.hide();
 
-		this.toDispose = Lifecycle.disposeAll(this.toDispose);
+		super.dispose();
 	}
 }

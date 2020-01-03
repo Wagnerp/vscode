@@ -2,841 +2,1051 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
 import 'vs/css!./media/editor';
-import 'vs/css!./media/tokens';
-import 'vs/css!./media/default-theme';
+import * as nls from 'vs/nls';
+import * as dom from 'vs/base/browser/dom';
+import { IKeyboardEvent } from 'vs/base/browser/keyboardEvent';
+import { IMouseEvent, IMouseWheelEvent } from 'vs/base/browser/mouseEvent';
+import { Color } from 'vs/base/common/color';
+import { onUnexpectedError } from 'vs/base/common/errors';
+import { Emitter, Event } from 'vs/base/common/event';
+import { hash } from 'vs/base/common/hash';
+import { Disposable, IDisposable, dispose } from 'vs/base/common/lifecycle';
+import { Schemas } from 'vs/base/common/network';
+import { Configuration } from 'vs/editor/browser/config/configuration';
+import { CoreEditorCommand } from 'vs/editor/browser/controller/coreCommands';
+import * as editorBrowser from 'vs/editor/browser/editorBrowser';
+import { EditorExtensionsRegistry, IEditorContributionDescription } from 'vs/editor/browser/editorExtensions';
+import { ICodeEditorService } from 'vs/editor/browser/services/codeEditorService';
+import { ICommandDelegate } from 'vs/editor/browser/view/viewController';
+import { IContentWidgetData, IOverlayWidgetData, View } from 'vs/editor/browser/view/viewImpl';
+import { ViewOutgoingEvents } from 'vs/editor/browser/view/viewOutgoingEvents';
+import { ConfigurationChangedEvent, EditorLayoutInfo, IEditorOptions, EditorOption, IComputedEditorOptions, FindComputedEditorOptionValueById, IEditorConstructionOptions } from 'vs/editor/common/config/editorOptions';
+import { Cursor, CursorStateChangedEvent } from 'vs/editor/common/controller/cursor';
+import { CursorColumns, ICursors } from 'vs/editor/common/controller/cursorCommon';
+import { ICursorPositionChangedEvent, ICursorSelectionChangedEvent } from 'vs/editor/common/controller/cursorEvents';
+import { IPosition, Position } from 'vs/editor/common/core/position';
+import { IRange, Range } from 'vs/editor/common/core/range';
+import { ISelection, Selection } from 'vs/editor/common/core/selection';
+import { InternalEditorAction } from 'vs/editor/common/editorAction';
+import * as editorCommon from 'vs/editor/common/editorCommon';
+import { EditorContextKeys } from 'vs/editor/common/editorContextKeys';
+import { EndOfLinePreference, IIdentifiedSingleEditOperation, IModelDecoration, IModelDecorationOptions, IModelDecorationsChangeAccessor, IModelDeltaDecoration, ITextModel, ICursorStateComputer } from 'vs/editor/common/model';
+import { ClassName } from 'vs/editor/common/model/intervalTree';
+import { ModelDecorationOptions } from 'vs/editor/common/model/textModel';
+import { IModelContentChangedEvent, IModelDecorationsChangedEvent, IModelLanguageChangedEvent, IModelLanguageConfigurationChangedEvent, IModelOptionsChangedEvent } from 'vs/editor/common/model/textModelEvents';
+import * as modes from 'vs/editor/common/modes';
+import { editorUnnecessaryCodeBorder, editorUnnecessaryCodeOpacity } from 'vs/editor/common/view/editorColorRegistry';
+import { editorErrorBorder, editorErrorForeground, editorHintBorder, editorHintForeground, editorInfoBorder, editorInfoForeground, editorWarningBorder, editorWarningForeground, editorForeground } from 'vs/platform/theme/common/colorRegistry';
+import { VerticalRevealType } from 'vs/editor/common/view/viewEvents';
+import { IEditorWhitespace } from 'vs/editor/common/viewLayout/linesLayout';
+import { ViewModel } from 'vs/editor/common/viewModel/viewModelImpl';
+import { ICommandService } from 'vs/platform/commands/common/commands';
+import { IContextKey, IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
+import { IInstantiationService, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
+import { ServiceCollection } from 'vs/platform/instantiation/common/serviceCollection';
+import { INotificationService } from 'vs/platform/notification/common/notification';
+import { IThemeService, registerThemingParticipant } from 'vs/platform/theme/common/themeService';
+import { IAccessibilityService } from 'vs/platform/accessibility/common/accessibility';
+import { withNullAsUndefined } from 'vs/base/common/types';
 
-import EditorCommon = require('vs/editor/common/editorCommon');
-import Browser = require('vs/base/browser/browser');
+let EDITOR_ID = 0;
 
-import Colorizer = require('vs/editor/browser/standalone/colorizer');
-import {TPromise} from 'vs/base/common/winjs.base';
-import Objects = require('vs/base/common/objects');
-import Errors = require('vs/base/common/errors');
-import DOM = require('vs/base/browser/dom');
-import EventEmitter = require('vs/base/common/eventEmitter');
-import Configuration = require('vs/editor/browser/config/configuration');
-import Cursor = require('vs/editor/common/controller/cursor');
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import ViewImpl = require('vs/editor/browser/view/viewImpl');
-import CharacterHardWrappingLineMapper = require('vs/editor/common/viewModel/characterHardWrappingLineMapper');
-import SplitLinesCollection = require('vs/editor/common/viewModel/splitLinesCollection');
-import ViewModel = require('vs/editor/common/viewModel/viewModel');
-import Timer = require('vs/base/common/timer');
-import {EditorBrowserRegistry} from 'vs/editor/browser/editorBrowserExtensions';
-import {CommonEditorRegistry} from 'vs/editor/common/editorCommonExtensions';
-import Actions = require('vs/base/common/actions');
-import CursorMoveHelper = require('vs/editor/common/controller/cursorMoveHelper');
-import OneCursor = require('vs/editor/common/controller/oneCursor');
-import Lifecycle = require('vs/base/common/lifecycle');
-import {DynamicEditorAction} from 'vs/editor/common/editorAction';
-import {ICodeEditorService} from 'vs/editor/common/services/codeEditorService';
-import {Range} from 'vs/editor/common/core/range';
-import {Position} from 'vs/editor/common/core/position';
-import {Selection} from 'vs/editor/common/core/selection';
-import {IInstantiationService} from 'vs/platform/instantiation/common/instantiation';
-import {ITelemetryService} from 'vs/platform/telemetry/common/telemetry';
+export interface ICodeEditorWidgetOptions {
+	/**
+	 * Is this a simple widget (not a real code editor) ?
+	 * Defaults to false.
+	 */
+	isSimpleWidget?: boolean;
 
-import {EditorState} from 'vs/editor/common/core/editorState';
-import {IKeybindingService, IKeybindingContextKey} from 'vs/platform/keybinding/common/keybindingService';
+	/**
+	 * Contributions to instantiate.
+	 * Defaults to EditorExtensionsRegistry.getEditorContributions().
+	 */
+	contributions?: IEditorContributionDescription[];
 
-var EDITOR_ID = 0;
+	/**
+	 * Telemetry data associated with this CodeEditorWidget.
+	 * Defaults to null.
+	 */
+	telemetryData?: object;
+}
 
-export class CodeEditorWidget extends EventEmitter.EventEmitter implements Actions.IActionProvider, EditorBrowser.ICodeEditor {
+class ModelData {
+	public readonly model: ITextModel;
+	public readonly viewModel: ViewModel;
+	public readonly cursor: Cursor;
+	public readonly view: View;
+	public readonly hasRealView: boolean;
+	public readonly listenersToRemove: IDisposable[];
 
-	private id:number;
-	private domElement:HTMLElement;
-	_lifetimeListeners:EventEmitter.ListenerUnbind[];
-	_lifetimeDispose: Lifecycle.IDisposable[];
-	_configuration:Configuration.Configuration;
-	private focusTracker:DOM.IFocusTracker;
-	_telemetryService:ITelemetryService;
+	constructor(model: ITextModel, viewModel: ViewModel, cursor: Cursor, view: View, hasRealView: boolean, listenersToRemove: IDisposable[]) {
+		this.model = model;
+		this.viewModel = viewModel;
+		this.cursor = cursor;
+		this.view = view;
+		this.hasRealView = hasRealView;
+		this.listenersToRemove = listenersToRemove;
+	}
 
-	private contributions:{ [key:string]:EditorCommon.IEditorContribution; };
-	private contentWidgets:{ [key:string]:EditorBrowser.IContentWidgetData; };
-	private overlayWidgets:{ [key:string]:EditorBrowser.IOverlayWidgetData; };
-	private forcedWidgetFocusCount:number;
+	public dispose(): void {
+		dispose(this.listenersToRemove);
+		this.model.onBeforeDetached();
+		if (this.hasRealView) {
+			this.view.dispose();
+		}
+		this.cursor.dispose();
+		this.viewModel.dispose();
+	}
+}
+
+export class CodeEditorWidget extends Disposable implements editorBrowser.ICodeEditor {
+
+	//#region Eventing
+	private readonly _onDidDispose: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onDidDispose: Event<void> = this._onDidDispose.event;
+
+	private readonly _onDidChangeModelContent: Emitter<IModelContentChangedEvent> = this._register(new Emitter<IModelContentChangedEvent>());
+	public readonly onDidChangeModelContent: Event<IModelContentChangedEvent> = this._onDidChangeModelContent.event;
+
+	private readonly _onDidChangeModelLanguage: Emitter<IModelLanguageChangedEvent> = this._register(new Emitter<IModelLanguageChangedEvent>());
+	public readonly onDidChangeModelLanguage: Event<IModelLanguageChangedEvent> = this._onDidChangeModelLanguage.event;
+
+	private readonly _onDidChangeModelLanguageConfiguration: Emitter<IModelLanguageConfigurationChangedEvent> = this._register(new Emitter<IModelLanguageConfigurationChangedEvent>());
+	public readonly onDidChangeModelLanguageConfiguration: Event<IModelLanguageConfigurationChangedEvent> = this._onDidChangeModelLanguageConfiguration.event;
+
+	private readonly _onDidChangeModelOptions: Emitter<IModelOptionsChangedEvent> = this._register(new Emitter<IModelOptionsChangedEvent>());
+	public readonly onDidChangeModelOptions: Event<IModelOptionsChangedEvent> = this._onDidChangeModelOptions.event;
+
+	private readonly _onDidChangeModelDecorations: Emitter<IModelDecorationsChangedEvent> = this._register(new Emitter<IModelDecorationsChangedEvent>());
+	public readonly onDidChangeModelDecorations: Event<IModelDecorationsChangedEvent> = this._onDidChangeModelDecorations.event;
+
+	private readonly _onDidChangeConfiguration: Emitter<ConfigurationChangedEvent> = this._register(new Emitter<ConfigurationChangedEvent>());
+	public readonly onDidChangeConfiguration: Event<ConfigurationChangedEvent> = this._onDidChangeConfiguration.event;
+
+	protected readonly _onDidChangeModel: Emitter<editorCommon.IModelChangedEvent> = this._register(new Emitter<editorCommon.IModelChangedEvent>());
+	public readonly onDidChangeModel: Event<editorCommon.IModelChangedEvent> = this._onDidChangeModel.event;
+
+	private readonly _onDidChangeCursorPosition: Emitter<ICursorPositionChangedEvent> = this._register(new Emitter<ICursorPositionChangedEvent>());
+	public readonly onDidChangeCursorPosition: Event<ICursorPositionChangedEvent> = this._onDidChangeCursorPosition.event;
+
+	private readonly _onDidChangeCursorSelection: Emitter<ICursorSelectionChangedEvent> = this._register(new Emitter<ICursorSelectionChangedEvent>());
+	public readonly onDidChangeCursorSelection: Event<ICursorSelectionChangedEvent> = this._onDidChangeCursorSelection.event;
+
+	private readonly _onDidAttemptReadOnlyEdit: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onDidAttemptReadOnlyEdit: Event<void> = this._onDidAttemptReadOnlyEdit.event;
+
+	private readonly _onDidLayoutChange: Emitter<EditorLayoutInfo> = this._register(new Emitter<EditorLayoutInfo>());
+	public readonly onDidLayoutChange: Event<EditorLayoutInfo> = this._onDidLayoutChange.event;
+
+	private readonly _editorTextFocus: BooleanEventEmitter = this._register(new BooleanEventEmitter());
+	public readonly onDidFocusEditorText: Event<void> = this._editorTextFocus.onDidChangeToTrue;
+	public readonly onDidBlurEditorText: Event<void> = this._editorTextFocus.onDidChangeToFalse;
+
+	private readonly _editorWidgetFocus: BooleanEventEmitter = this._register(new BooleanEventEmitter());
+	public readonly onDidFocusEditorWidget: Event<void> = this._editorWidgetFocus.onDidChangeToTrue;
+	public readonly onDidBlurEditorWidget: Event<void> = this._editorWidgetFocus.onDidChangeToFalse;
+
+	private readonly _onWillType: Emitter<string> = this._register(new Emitter<string>());
+	public readonly onWillType = this._onWillType.event;
+
+	private readonly _onDidType: Emitter<string> = this._register(new Emitter<string>());
+	public readonly onDidType = this._onDidType.event;
+
+	private readonly _onCompositionStart: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onCompositionStart = this._onCompositionStart.event;
+
+	private readonly _onCompositionEnd: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onCompositionEnd = this._onCompositionEnd.event;
+
+	private readonly _onDidPaste: Emitter<Range> = this._register(new Emitter<Range>());
+	public readonly onDidPaste = this._onDidPaste.event;
+
+	private readonly _onMouseUp: Emitter<editorBrowser.IEditorMouseEvent> = this._register(new Emitter<editorBrowser.IEditorMouseEvent>());
+	public readonly onMouseUp: Event<editorBrowser.IEditorMouseEvent> = this._onMouseUp.event;
+
+	private readonly _onMouseDown: Emitter<editorBrowser.IEditorMouseEvent> = this._register(new Emitter<editorBrowser.IEditorMouseEvent>());
+	public readonly onMouseDown: Event<editorBrowser.IEditorMouseEvent> = this._onMouseDown.event;
+
+	private readonly _onMouseDrag: Emitter<editorBrowser.IEditorMouseEvent> = this._register(new Emitter<editorBrowser.IEditorMouseEvent>());
+	public readonly onMouseDrag: Event<editorBrowser.IEditorMouseEvent> = this._onMouseDrag.event;
+
+	private readonly _onMouseDrop: Emitter<editorBrowser.IPartialEditorMouseEvent> = this._register(new Emitter<editorBrowser.IPartialEditorMouseEvent>());
+	public readonly onMouseDrop: Event<editorBrowser.IPartialEditorMouseEvent> = this._onMouseDrop.event;
+
+	private readonly _onContextMenu: Emitter<editorBrowser.IEditorMouseEvent> = this._register(new Emitter<editorBrowser.IEditorMouseEvent>());
+	public readonly onContextMenu: Event<editorBrowser.IEditorMouseEvent> = this._onContextMenu.event;
+
+	private readonly _onMouseMove: Emitter<editorBrowser.IEditorMouseEvent> = this._register(new Emitter<editorBrowser.IEditorMouseEvent>());
+	public readonly onMouseMove: Event<editorBrowser.IEditorMouseEvent> = this._onMouseMove.event;
+
+	private readonly _onMouseLeave: Emitter<editorBrowser.IPartialEditorMouseEvent> = this._register(new Emitter<editorBrowser.IPartialEditorMouseEvent>());
+	public readonly onMouseLeave: Event<editorBrowser.IPartialEditorMouseEvent> = this._onMouseLeave.event;
+
+	private readonly _onMouseWheel: Emitter<IMouseWheelEvent> = this._register(new Emitter<IMouseWheelEvent>());
+	public readonly onMouseWheel: Event<IMouseWheelEvent> = this._onMouseWheel.event;
+
+	private readonly _onKeyUp: Emitter<IKeyboardEvent> = this._register(new Emitter<IKeyboardEvent>());
+	public readonly onKeyUp: Event<IKeyboardEvent> = this._onKeyUp.event;
+
+	private readonly _onKeyDown: Emitter<IKeyboardEvent> = this._register(new Emitter<IKeyboardEvent>());
+	public readonly onKeyDown: Event<IKeyboardEvent> = this._onKeyDown.event;
+
+	private readonly _onDidScrollChange: Emitter<editorCommon.IScrollEvent> = this._register(new Emitter<editorCommon.IScrollEvent>());
+	public readonly onDidScrollChange: Event<editorCommon.IScrollEvent> = this._onDidScrollChange.event;
+
+	private readonly _onDidChangeViewZones: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onDidChangeViewZones: Event<void> = this._onDidChangeViewZones.event;
+	//#endregion
+
+	public readonly isSimpleWidget: boolean;
+	private readonly _telemetryData?: object;
+
+	private readonly _domElement: HTMLElement;
+	private readonly _id: number;
+	private readonly _configuration: editorCommon.IConfiguration;
+
+	protected readonly _contributions: { [key: string]: editorCommon.IEditorContribution; };
+	protected readonly _actions: { [key: string]: editorCommon.IEditorAction; };
 
 	// --- Members logically associated to a model
-	/*protected*/public model:EditorCommon.IModel;
-	/*protected*/public listenersToRemove:EventEmitter.ListenerUnbind[];
-	private hasView: boolean;
-	_view:EditorBrowser.IView;
-	private viewModel:ViewModel.ViewModel;
-	/*protected*/public cursor:Cursor.Cursor;
+	protected _modelData: ModelData | null;
 
-	private _instantiationService: IInstantiationService;
-	protected _keybindingService: IKeybindingService;
+	protected readonly _instantiationService: IInstantiationService;
+	protected readonly _contextKeyService: IContextKeyService;
+	private readonly _notificationService: INotificationService;
+	private readonly _codeEditorService: ICodeEditorService;
+	private readonly _commandService: ICommandService;
+	private readonly _themeService: IThemeService;
 
-	private _decorationTypeKeysToIds: {[decorationTypeKey:string]:string[];};
+	private readonly _focusTracker: CodeEditorWidgetFocusTracker;
 
-	private _codeEditorService: ICodeEditorService;
-	private _editorIdContextKey: IKeybindingContextKey<string>;
-	private _editorFocusContextKey: IKeybindingContextKey<boolean>;
-	private _editorTabMovesFocusKey: IKeybindingContextKey<boolean>;
-	private _hasMultipleSelectionsKey: IKeybindingContextKey<boolean>;
-	private _hasNonEmptySelectionKey: IKeybindingContextKey<boolean>;
-	private _langIdKey: IKeybindingContextKey<string>;
+	private readonly _contentWidgets: { [key: string]: IContentWidgetData; };
+	private readonly _overlayWidgets: { [key: string]: IOverlayWidgetData; };
+
+	/**
+	 * map from "parent" decoration type to live decoration ids.
+	 */
+	private _decorationTypeKeysToIds: { [decorationTypeKey: string]: string[] };
+	private _decorationTypeSubtypes: { [decorationTypeKey: string]: { [subtype: string]: boolean } };
 
 	constructor(
-		domElement:HTMLElement,
-		options:EditorCommon.ICodeEditorWidgetCreationOptions,
+		domElement: HTMLElement,
+		options: IEditorConstructionOptions,
+		codeEditorWidgetOptions: ICodeEditorWidgetOptions,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@ICodeEditorService codeEditorService: ICodeEditorService,
-		@IKeybindingService keybindingService: IKeybindingService,
-		@ITelemetryService telemetryService: ITelemetryService
+		@ICommandService commandService: ICommandService,
+		@IContextKeyService contextKeyService: IContextKeyService,
+		@IThemeService themeService: IThemeService,
+		@INotificationService notificationService: INotificationService,
+		@IAccessibilityService accessibilityService: IAccessibilityService
 	) {
 		super();
-
-		this.id = (++EDITOR_ID);
-		this._codeEditorService = codeEditorService;
-
-		var timerEvent = Timer.start(Timer.Topic.EDITOR, 'CodeEditor.ctor');
-
-		this.domElement = domElement;
-
-		this._lifetimeDispose = [];
-
-		this._keybindingService = keybindingService.createScoped(domElement);
-		this._editorIdContextKey = this._keybindingService.createKey('editorId', this.getId());
-		this._editorFocusContextKey = this._keybindingService.createKey(EditorCommon.KEYBINDING_CONTEXT_EDITOR_FOCUS, undefined);
-		this._editorTabMovesFocusKey = this._keybindingService.createKey(EditorCommon.KEYBINDING_CONTEXT_EDITOR_TAB_MOVES_FOCUS, false);
-		this._hasMultipleSelectionsKey = this._keybindingService.createKey(EditorCommon.KEYBINDING_CONTEXT_EDITOR_HAS_MULTIPLE_SELECTIONS, false);
-		this._hasNonEmptySelectionKey = this._keybindingService.createKey(EditorCommon.KEYBINDING_CONTEXT_EDITOR_HAS_NON_EMPTY_SELECTION, false);
-		this._langIdKey = this._keybindingService.createKey<string>(EditorCommon.KEYBINDING_CONTEXT_EDITOR_LANGUAGE_ID, undefined);
-
-		// listeners that are kept during the whole editor lifetime
-		this._lifetimeListeners = [];
+		this._domElement = domElement;
+		this._id = (++EDITOR_ID);
 		this._decorationTypeKeysToIds = {};
+		this._decorationTypeSubtypes = {};
+		this.isSimpleWidget = codeEditorWidgetOptions.isSimpleWidget || false;
+		this._telemetryData = codeEditorWidgetOptions.telemetryData;
 
 		options = options || {};
-		var model: EditorCommon.IModel = null;
-		if (options.model) {
-			model = options.model;
-			delete options.model;
+		this._configuration = this._register(this._createConfiguration(options, accessibilityService));
+		this._register(this._configuration.onDidChange((e) => {
+			this._onDidChangeConfiguration.fire(e);
+
+			const options = this._configuration.options;
+			if (e.hasChanged(EditorOption.layoutInfo)) {
+				const layoutInfo = options.get(EditorOption.layoutInfo);
+				this._onDidLayoutChange.fire(layoutInfo);
+			}
+		}));
+
+		this._contextKeyService = this._register(contextKeyService.createScoped(this._domElement));
+		this._notificationService = notificationService;
+		this._codeEditorService = codeEditorService;
+		this._commandService = commandService;
+		this._themeService = themeService;
+		this._register(new EditorContextKeysManager(this, this._contextKeyService));
+		this._register(new EditorModeContext(this, this._contextKeyService));
+
+		this._instantiationService = instantiationService.createChild(new ServiceCollection([IContextKeyService, this._contextKeyService]));
+
+		this._modelData = null;
+
+		this._contributions = {};
+		this._actions = {};
+
+		this._focusTracker = new CodeEditorWidgetFocusTracker(domElement);
+		this._focusTracker.onChange(() => {
+			this._editorWidgetFocus.setValue(this._focusTracker.hasFocus());
+		});
+
+		this._contentWidgets = {};
+		this._overlayWidgets = {};
+
+		let contributions: IEditorContributionDescription[];
+		if (Array.isArray(codeEditorWidgetOptions.contributions)) {
+			contributions = codeEditorWidgetOptions.contributions;
+		} else {
+			contributions = EditorExtensionsRegistry.getEditorContributions();
 		}
-
-		this._configuration = new Configuration.Configuration(options, domElement, (tabSize:number) => {
-			if (this.model) {
-				return this.model.guessIndentation(tabSize);
-			}
-			return null;
-		});
-		if (this._configuration.editor.tabFocusMode) {
-			this._editorTabMovesFocusKey.set(true);
-		}
-		this._lifetimeListeners.push(this._configuration.addListener(EditorCommon.EventType.ConfigurationChanged, (e) => this.emit(EditorCommon.EventType.ConfigurationChanged, e)));
-
-		this.forcedWidgetFocusCount = 0;
-
-		// track focus of the domElement and all its anchestors
-		this.focusTracker = DOM.trackFocus(this.domElement);
-		this.focusTracker.addFocusListener(() => {
-			if (this.forcedWidgetFocusCount === 0) {
-				this._editorFocusContextKey.set(true);
-				this.emit(EditorCommon.EventType.EditorFocus, {});
-			}
-		});
-		this.focusTracker.addBlurListener(() => {
-			if (this.forcedWidgetFocusCount === 0) {
-				this._editorFocusContextKey.reset();
-				this.emit(EditorCommon.EventType.EditorBlur, {});
-			}
-		});
-
-		this._telemetryService = telemetryService;
-		this._instantiationService = instantiationService.createChild({
-			keybindingService: this._keybindingService
-		});
-
-		this._attachModel(model);
-		this.contentWidgets = {};
-		this.overlayWidgets = {};
-
-		// Create editor contributions
-		this.contributions = {};
-		var contributionDescriptors = [].concat(EditorBrowserRegistry.getEditorContributions()).concat(CommonEditorRegistry.getEditorContributions());
-		for (var i = 0, len = contributionDescriptors.length; i < len; i++) {
+		for (const desc of contributions) {
 			try {
-				var contribution = contributionDescriptors[i].createInstance(this._instantiationService, this);
-				this.contributions[contribution.getId()] = contribution;
+				const contribution = this._instantiationService.createInstance(desc.ctor, this);
+				this._contributions[desc.id] = contribution;
 			} catch (err) {
-				console.error('Could not instantiate contribution ' + contribution.getId());
-				Errors.onUnexpectedError(err);
+				onUnexpectedError(err);
 			}
 		}
 
-		timerEvent.stop();
+		EditorExtensionsRegistry.getEditorActions().forEach((action) => {
+			const internalAction = new InternalEditorAction(
+				action.id,
+				action.label,
+				action.alias,
+				withNullAsUndefined(action.precondition),
+				(): Promise<void> => {
+					return this._instantiationService.invokeFunction((accessor) => {
+						return Promise.resolve(action.runEditorCommand(accessor, this, null));
+					});
+				},
+				this._contextKeyService
+			);
+			this._actions[internalAction.id] = internalAction;
+		});
 
 		this._codeEditorService.addCodeEditor(this);
 	}
 
+	protected _createConfiguration(options: IEditorConstructionOptions, accessibilityService: IAccessibilityService): editorCommon.IConfiguration {
+		return new Configuration(this.isSimpleWidget, options, this._domElement, accessibilityService);
+	}
+
 	public getId(): string {
-		return this.getEditorType() + ':' + this.id;
+		return this.getEditorType() + ':' + this._id;
 	}
 
 	public getEditorType(): string {
-		return EditorCommon.EditorType.ICodeEditor;
-	}
-
-	public destroy(): void {
-		this.dispose();
+		return editorCommon.EditorType.ICodeEditor;
 	}
 
 	public dispose(): void {
 		this._codeEditorService.removeCodeEditor(this);
-		this._lifetimeDispose = Lifecycle.disposeAll(this._lifetimeDispose);
-		// unbind listeners
-		while(this._lifetimeListeners.length > 0) {
-			this._lifetimeListeners.pop()();
+
+		this._focusTracker.dispose();
+
+		const keys = Object.keys(this._contributions);
+		for (let i = 0, len = keys.length; i < len; i++) {
+			const contributionId = keys[i];
+			this._contributions[contributionId].dispose();
 		}
 
-		var contributionId:string;
-		for (contributionId in this.contributions) {
-			if (this.contributions.hasOwnProperty(contributionId)) {
-				this.contributions[contributionId].dispose();
-			}
-		}
-		this.contributions = {};
-		this.contentWidgets = {};
-		this.overlayWidgets = {};
-
-		this.focusTracker.dispose();
+		this._removeDecorationTypes();
 		this._postDetachModelCleanup(this._detachModel());
-		this._configuration.dispose();
-		this._keybindingService.dispose();
-		this.emit(EditorCommon.EventType.Disposed, {});
+
+		this._onDidDispose.fire();
+
 		super.dispose();
 	}
 
-	public captureState(...flags:EditorCommon.CodeEditorStateFlag[]): EditorCommon.ICodeEditorState {
-		return new EditorState(this, flags);
+	public invokeWithinContext<T>(fn: (accessor: ServicesAccessor) => T): T {
+		return this._instantiationService.invokeFunction(fn);
 	}
 
-	public colorizeModelLine(lineNumber:number, model:EditorCommon.IModel = this.model): string {
-		if (!model) {
-			return '';
-		}
-		var content = model.getLineContent(lineNumber);
-		var tokens = model.getLineTokens(lineNumber, false);
-		var inflatedTokens = EditorCommon.LineTokensBinaryEncoding.inflateArr(tokens.getBinaryEncodedTokensMap(), tokens.getBinaryEncodedTokens());
-		var indent = this._configuration.getIndentationOptions();
-		return Colorizer.colorizeLine(content, inflatedTokens, indent.tabSize);
-	}
-
-	public updateOptions(newOptions:EditorCommon.IEditorOptions): void {
+	public updateOptions(newOptions: IEditorOptions): void {
 		this._configuration.updateOptions(newOptions);
-		if (this._configuration.editor.tabFocusMode) {
-			this._editorTabMovesFocusKey.set(true);
-		} else {
-			this._editorTabMovesFocusKey.reset();
-		}
 	}
 
-	public getConfiguration(): EditorCommon.IInternalEditorOptions {
-		return Objects.clone(this._configuration.editor);
+	public getOptions(): IComputedEditorOptions {
+		return this._configuration.options;
 	}
 
-	public getRawConfiguration(): EditorCommon.IEditorOptions {
+	public getOption<T extends EditorOption>(id: T): FindComputedEditorOptionValueById<T> {
+		return this._configuration.options.get(id);
+	}
+
+	public getRawOptions(): IEditorOptions {
 		return this._configuration.getRawOptions();
 	}
 
-	public getIndentationOptions(): EditorCommon.IInternalIndentationOptions {
-		return Objects.clone(this._configuration.getIndentationOptions());
-	}
-
-	public normalizeIndentation(str:string): string {
-		return this._configuration.normalizeIndentation(str);
-	}
-
-	public getValue(options:{ preserveBOM:boolean; lineEnding:string; }=null): string {
-		if (this.model) {
-			var preserveBOM:boolean = (options && options.preserveBOM) ? true : false;
-			var eolPreference = EditorCommon.EndOfLinePreference.TextDefined;
-			if (options && options.lineEnding && options.lineEnding === '\n') {
-				eolPreference = EditorCommon.EndOfLinePreference.LF;
-			} else if (options  && options.lineEnding && options.lineEnding === '\r\n') {
-				eolPreference = EditorCommon.EndOfLinePreference.CRLF;
-			}
-			return this.model.getValue(eolPreference, preserveBOM);
+	public getValue(options: { preserveBOM: boolean; lineEnding: string; } | null = null): string {
+		if (!this._modelData) {
+			return '';
 		}
-		return '';
-	}
 
-	public setValue(newValue:string): void {
-		if (this.model) {
-			this.model.setValue(newValue);
+		const preserveBOM: boolean = (options && options.preserveBOM) ? true : false;
+		let eolPreference = EndOfLinePreference.TextDefined;
+		if (options && options.lineEnding && options.lineEnding === '\n') {
+			eolPreference = EndOfLinePreference.LF;
+		} else if (options && options.lineEnding && options.lineEnding === '\r\n') {
+			eolPreference = EndOfLinePreference.CRLF;
 		}
+		return this._modelData.model.getValue(eolPreference, preserveBOM);
 	}
 
-	public getView(): EditorBrowser.IView {
-		return this._view;
+	public setValue(newValue: string): void {
+		if (!this._modelData) {
+			return;
+		}
+		this._modelData.model.setValue(newValue);
 	}
 
-	public getModel(): EditorCommon.IModel {
-		return this.model;
+	public getModel(): ITextModel | null {
+		if (!this._modelData) {
+			return null;
+		}
+		return this._modelData.model;
 	}
 
-	public setModel(model:EditorCommon.IModel = null): void {
-		if (this.model === model) {
+	public setModel(_model: ITextModel | editorCommon.IDiffEditorModel | null = null): void {
+		const model = <ITextModel | null>_model;
+		if (this._modelData === null && model === null) {
 			// Current model is the new model
 			return;
 		}
-
-		var timerEvent = Timer.start(Timer.Topic.EDITOR, 'CodeEditor.setModel');
-
-		var detachedModel = this._detachModel();
+		if (this._modelData && this._modelData.model === model) {
+			// Current model is the new model
+			return;
+		}
+		const hasTextFocus = this.hasTextFocus();
+		const detachedModel = this._detachModel();
 		this._attachModel(model);
-
-		var oldModelUrl: string = null;
-		var newModelUrl: string = null;
-
-		if (detachedModel) {
-			oldModelUrl = detachedModel.getAssociatedResource().toString();
+		if (hasTextFocus && this.hasModel()) {
+			this.focus();
 		}
-		if (model) {
-			newModelUrl = model.getAssociatedResource().toString();
-		}
-		var e: EditorCommon.IModelChangedEvent = {
-			oldModelUrl: oldModelUrl,
-			newModelUrl: newModelUrl
+
+		const e: editorCommon.IModelChangedEvent = {
+			oldModelUrl: detachedModel ? detachedModel.uri : null,
+			newModelUrl: model ? model.uri : null
 		};
 
-		timerEvent.stop();
-
-		this.emit(EditorCommon.EventType.ModelChanged, e);
+		this._removeDecorationTypes();
+		this._onDidChangeModel.fire(e);
 		this._postDetachModelCleanup(detachedModel);
 	}
 
-	public getDomNode(): HTMLElement {
-		if (!this.hasView) {
-			return null;
+	private _removeDecorationTypes(): void {
+		this._decorationTypeKeysToIds = {};
+		if (this._decorationTypeSubtypes) {
+			for (let decorationType in this._decorationTypeSubtypes) {
+				const subTypes = this._decorationTypeSubtypes[decorationType];
+				for (let subType in subTypes) {
+					this._removeDecorationType(decorationType + '-' + subType);
+				}
+			}
+			this._decorationTypeSubtypes = {};
 		}
-		return this._view.domNode;
 	}
 
-	public getCenteredRangeInViewport(): EditorCommon.IEditorRange {
-		if (!this.hasView) {
-			return null;
+	public getVisibleRanges(): Range[] {
+		if (!this._modelData) {
+			return [];
 		}
-		return this._view.getCenteredRangeInViewport();
+		return this._modelData.viewModel.getVisibleRanges();
 	}
 
-	public getVisibleColumnFromPosition(rawPosition:EditorCommon.IPosition): number {
-		if (!this.model) {
+	public getWhitespaces(): IEditorWhitespace[] {
+		if (!this._modelData) {
+			return [];
+		}
+		return this._modelData.viewModel.viewLayout.getWhitespaces();
+	}
+
+	private static _getVerticalOffsetForPosition(modelData: ModelData, modelLineNumber: number, modelColumn: number): number {
+		const modelPosition = modelData.model.validatePosition({
+			lineNumber: modelLineNumber,
+			column: modelColumn
+		});
+		const viewPosition = modelData.viewModel.coordinatesConverter.convertModelPositionToViewPosition(modelPosition);
+		return modelData.viewModel.viewLayout.getVerticalOffsetForLineNumber(viewPosition.lineNumber);
+	}
+
+	public getTopForLineNumber(lineNumber: number): number {
+		if (!this._modelData) {
+			return -1;
+		}
+		return CodeEditorWidget._getVerticalOffsetForPosition(this._modelData, lineNumber, 1);
+	}
+
+	public getTopForPosition(lineNumber: number, column: number): number {
+		if (!this._modelData) {
+			return -1;
+		}
+		return CodeEditorWidget._getVerticalOffsetForPosition(this._modelData, lineNumber, column);
+	}
+
+	public setHiddenAreas(ranges: IRange[]): void {
+		if (this._modelData) {
+			this._modelData.viewModel.setHiddenAreas(ranges.map(r => Range.lift(r)));
+		}
+	}
+
+	public getVisibleColumnFromPosition(rawPosition: IPosition): number {
+		if (!this._modelData) {
 			return rawPosition.column;
 		}
 
-		var position = this.model.validatePosition(rawPosition);
+		const position = this._modelData.model.validatePosition(rawPosition);
+		const tabSize = this._modelData.model.getOptions().tabSize;
 
-		return CursorMoveHelper.CursorMoveHelper.visibleColumnFromColumn(this.model, position.lineNumber, position.column, this._configuration.getIndentationOptions().tabSize) + 1;
+		return CursorColumns.visibleColumnFromColumn(this._modelData.model.getLineContent(position.lineNumber), position.column, tabSize) + 1;
 	}
 
-	public getPosition(): EditorCommon.IEditorPosition {
-		if (!this.cursor) {
+	public getStatusbarColumn(rawPosition: IPosition): number {
+		if (!this._modelData) {
+			return rawPosition.column;
+		}
+
+		const position = this._modelData.model.validatePosition(rawPosition);
+		const tabSize = this._modelData.model.getOptions().tabSize;
+
+		return CursorColumns.toStatusbarColumn(this._modelData.model.getLineContent(position.lineNumber), position.column, tabSize);
+	}
+
+	public getPosition(): Position | null {
+		if (!this._modelData) {
 			return null;
 		}
-		return this.cursor.getPosition().clone();
+		return this._modelData.cursor.getPosition();
 	}
 
-	public setPosition(position:EditorCommon.IPosition, reveal:boolean = false, revealVerticalInCenter:boolean = false, revealHorizontal:boolean = false): void {
-		if (!this.cursor) {
+	public setPosition(position: IPosition): void {
+		if (!this._modelData) {
 			return;
 		}
 		if (!Position.isIPosition(position)) {
 			throw new Error('Invalid arguments');
 		}
-		this.cursor.setSelections('api', [{
+		this._modelData.cursor.setSelections('api', [{
 			selectionStartLineNumber: position.lineNumber,
 			selectionStartColumn: position.column,
 			positionLineNumber: position.lineNumber,
 			positionColumn: position.column
 		}]);
-		if (reveal) {
-			this.revealPosition(position, revealVerticalInCenter, revealHorizontal);
-		}
 	}
 
-	private _sendRevealRange(range: EditorCommon.IRange, verticalType: EditorCommon.VerticalRevealType, revealHorizontal: boolean): void {
-		if (!this.model || !this.cursor) {
+	private _sendRevealRange(modelRange: Range, verticalType: VerticalRevealType, revealHorizontal: boolean, scrollType: editorCommon.ScrollType): void {
+		if (!this._modelData) {
 			return;
 		}
-		if (!Range.isIRange(range)) {
+		if (!Range.isIRange(modelRange)) {
 			throw new Error('Invalid arguments');
 		}
-		var validatedRange = this.model.validateRange(range);
+		const validatedModelRange = this._modelData.model.validateRange(modelRange);
+		const viewRange = this._modelData.viewModel.coordinatesConverter.convertModelRangeToViewRange(validatedModelRange);
 
-		var revealRangeEvent: EditorCommon.ICursorRevealRangeEvent = {
-			range: validatedRange,
-			viewRange: null,
-			verticalType: verticalType,
-			revealHorizontal: revealHorizontal
-		};
-		this.cursor.emit(EditorCommon.EventType.CursorRevealRange, revealRangeEvent);
+		this._modelData.cursor.emitCursorRevealRange('api', viewRange, verticalType, revealHorizontal, scrollType);
 	}
 
-	public revealLine(lineNumber: number): void {
-		this._sendRevealRange({
-			startLineNumber: lineNumber,
-			startColumn: 1,
-			endLineNumber: lineNumber,
-			endColumn: 1
-		}, EditorCommon.VerticalRevealType.Simple, false);
+	public revealLine(lineNumber: number, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealLine(lineNumber, VerticalRevealType.Simple, scrollType);
 	}
 
-	public revealLineInCenter(lineNumber: number): void {
-		this._sendRevealRange({
-			startLineNumber: lineNumber,
-			startColumn: 1,
-			endLineNumber: lineNumber,
-			endColumn: 1
-		}, EditorCommon.VerticalRevealType.Center, false);
+	public revealLineInCenter(lineNumber: number, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealLine(lineNumber, VerticalRevealType.Center, scrollType);
 	}
 
-	public revealLineInCenterIfOutsideViewport(lineNumber: number): void {
-		this._sendRevealRange({
-			startLineNumber: lineNumber,
-			startColumn: 1,
-			endLineNumber: lineNumber,
-			endColumn: 1
-		}, EditorCommon.VerticalRevealType.CenterIfOutsideViewport, false);
+	public revealLineInCenterIfOutsideViewport(lineNumber: number, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealLine(lineNumber, VerticalRevealType.CenterIfOutsideViewport, scrollType);
 	}
 
-	public revealPosition(position: EditorCommon.IPosition, revealVerticalInCenter:boolean=false, revealHorizontal:boolean=false): void {
+	private _revealLine(lineNumber: number, revealType: VerticalRevealType, scrollType: editorCommon.ScrollType): void {
+		if (typeof lineNumber !== 'number') {
+			throw new Error('Invalid arguments');
+		}
+
+		this._sendRevealRange(
+			new Range(lineNumber, 1, lineNumber, 1),
+			revealType,
+			false,
+			scrollType
+		);
+	}
+
+	public revealPosition(position: IPosition, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealPosition(
+			position,
+			VerticalRevealType.Simple,
+			true,
+			scrollType
+		);
+	}
+
+	public revealPositionInCenter(position: IPosition, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealPosition(
+			position,
+			VerticalRevealType.Center,
+			true,
+			scrollType
+		);
+	}
+
+	public revealPositionInCenterIfOutsideViewport(position: IPosition, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealPosition(
+			position,
+			VerticalRevealType.CenterIfOutsideViewport,
+			true,
+			scrollType
+		);
+	}
+
+	private _revealPosition(position: IPosition, verticalType: VerticalRevealType, revealHorizontal: boolean, scrollType: editorCommon.ScrollType): void {
 		if (!Position.isIPosition(position)) {
 			throw new Error('Invalid arguments');
 		}
-		this._sendRevealRange({
-			startLineNumber: position.lineNumber,
-			startColumn: position.column,
-			endLineNumber: position.lineNumber,
-			endColumn: position.column
-		}, revealVerticalInCenter ? EditorCommon.VerticalRevealType.Center : EditorCommon.VerticalRevealType.Simple, revealHorizontal);
+
+		this._sendRevealRange(
+			new Range(position.lineNumber, position.column, position.lineNumber, position.column),
+			verticalType,
+			revealHorizontal,
+			scrollType
+		);
 	}
 
-	public revealPositionInCenter(position: EditorCommon.IPosition): void {
-		if (!Position.isIPosition(position)) {
-			throw new Error('Invalid arguments');
-		}
-		this._sendRevealRange({
-			startLineNumber: position.lineNumber,
-			startColumn: position.column,
-			endLineNumber: position.lineNumber,
-			endColumn: position.column
-		}, EditorCommon.VerticalRevealType.Center, true);
-	}
-
-	public revealPositionInCenterIfOutsideViewport(position: EditorCommon.IPosition): void {
-		if (!Position.isIPosition(position)) {
-			throw new Error('Invalid arguments');
-		}
-		this._sendRevealRange({
-			startLineNumber: position.lineNumber,
-			startColumn: position.column,
-			endLineNumber: position.lineNumber,
-			endColumn: position.column
-		}, EditorCommon.VerticalRevealType.CenterIfOutsideViewport, true);
-	}
-
-	public getSelection(): EditorCommon.IEditorSelection {
-		if (!this.cursor) {
+	public getSelection(): Selection | null {
+		if (!this._modelData) {
 			return null;
 		}
-		return this.cursor.getSelection().clone();
+		return this._modelData.cursor.getSelection();
 	}
 
-	public getSelections(): EditorCommon.IEditorSelection[] {
-		if (!this.cursor) {
+	public getSelections(): Selection[] | null {
+		if (!this._modelData) {
 			return null;
 		}
-		var selections = this.cursor.getSelections();
-		var result:EditorCommon.IEditorSelection[] = [];
-		for (var i = 0, len = selections.length; i < len; i++) {
-			result[i] = selections[i].clone();
-		}
-		return result;
+		return this._modelData.cursor.getSelections();
 	}
 
-	public setSelection(range:EditorCommon.IRange, reveal?:boolean, revealVerticalInCenter?:boolean, revealHorizontal?:boolean): void;
-	public setSelection(editorRange:EditorCommon.IEditorRange, reveal?:boolean, revealVerticalInCenter?:boolean, revealHorizontal?:boolean): void;
-	public setSelection(selection:EditorCommon.ISelection, reveal?:boolean, revealVerticalInCenter?:boolean, revealHorizontal?:boolean): void;
-	public setSelection(editorSelection:EditorCommon.IEditorSelection, reveal?:boolean, revealVerticalInCenter?:boolean, revealHorizontal?:boolean): void;
-	public setSelection(something:any, reveal:boolean = false, revealVerticalInCenter:boolean = false, revealHorizontal:boolean = false): void {
-		var isSelection = Selection.isISelection(something);
-		var isRange = Range.isIRange(something);
+	public setSelection(range: IRange): void;
+	public setSelection(editorRange: Range): void;
+	public setSelection(selection: ISelection): void;
+	public setSelection(editorSelection: Selection): void;
+	public setSelection(something: any): void {
+		const isSelection = Selection.isISelection(something);
+		const isRange = Range.isIRange(something);
 
 		if (!isSelection && !isRange) {
 			throw new Error('Invalid arguments');
 		}
 
 		if (isSelection) {
-			this._setSelectionImpl(<EditorCommon.ISelection>something, reveal, revealVerticalInCenter, revealHorizontal);
+			this._setSelectionImpl(<ISelection>something);
 		} else if (isRange) {
 			// act as if it was an IRange
-			var selection:EditorCommon.ISelection = {
+			const selection: ISelection = {
 				selectionStartLineNumber: something.startLineNumber,
 				selectionStartColumn: something.startColumn,
 				positionLineNumber: something.endLineNumber,
 				positionColumn: something.endColumn
 			};
-			this._setSelectionImpl(selection, reveal, revealVerticalInCenter, revealHorizontal);
+			this._setSelectionImpl(selection);
 		}
 	}
 
-	private _setSelectionImpl(sel:EditorCommon.ISelection, reveal:boolean, revealVerticalInCenter:boolean, revealHorizontal:boolean): void {
-		if (!this.cursor) {
+	private _setSelectionImpl(sel: ISelection): void {
+		if (!this._modelData) {
 			return;
 		}
-		var selection = Selection.createSelection(sel.selectionStartLineNumber, sel.selectionStartColumn, sel.positionLineNumber, sel.positionColumn);
-		this.cursor.setSelections('api', [selection]);
-		if (reveal) {
-			this.revealRange(selection, revealVerticalInCenter, revealHorizontal);
+		const selection = new Selection(sel.selectionStartLineNumber, sel.selectionStartColumn, sel.positionLineNumber, sel.positionColumn);
+		this._modelData.cursor.setSelections('api', [selection]);
+	}
+
+	public revealLines(startLineNumber: number, endLineNumber: number, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealLines(
+			startLineNumber,
+			endLineNumber,
+			VerticalRevealType.Simple,
+			scrollType
+		);
+	}
+
+	public revealLinesInCenter(startLineNumber: number, endLineNumber: number, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealLines(
+			startLineNumber,
+			endLineNumber,
+			VerticalRevealType.Center,
+			scrollType
+		);
+	}
+
+	public revealLinesInCenterIfOutsideViewport(startLineNumber: number, endLineNumber: number, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealLines(
+			startLineNumber,
+			endLineNumber,
+			VerticalRevealType.CenterIfOutsideViewport,
+			scrollType
+		);
+	}
+
+	private _revealLines(startLineNumber: number, endLineNumber: number, verticalType: VerticalRevealType, scrollType: editorCommon.ScrollType): void {
+		if (typeof startLineNumber !== 'number' || typeof endLineNumber !== 'number') {
+			throw new Error('Invalid arguments');
 		}
+
+		this._sendRevealRange(
+			new Range(startLineNumber, 1, endLineNumber, 1),
+			verticalType,
+			false,
+			scrollType
+		);
 	}
 
-	public revealLines(startLineNumber: number, endLineNumber: number): void {
-		this._sendRevealRange({
-			startLineNumber: startLineNumber,
-			startColumn: 1,
-			endLineNumber: endLineNumber,
-			endColumn: 1
-		}, EditorCommon.VerticalRevealType.Simple, false);
+	public revealRange(range: IRange, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth, revealVerticalInCenter: boolean = false, revealHorizontal: boolean = true): void {
+		this._revealRange(
+			range,
+			revealVerticalInCenter ? VerticalRevealType.Center : VerticalRevealType.Simple,
+			revealHorizontal,
+			scrollType
+		);
 	}
 
-	public revealLinesInCenter(startLineNumber: number, endLineNumber: number): void {
-		this._sendRevealRange({
-			startLineNumber: startLineNumber,
-			startColumn: 1,
-			endLineNumber: endLineNumber,
-			endColumn: 1
-		}, EditorCommon.VerticalRevealType.Center, false);
+	public revealRangeInCenter(range: IRange, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealRange(
+			range,
+			VerticalRevealType.Center,
+			true,
+			scrollType
+		);
 	}
 
-	public revealLinesInCenterIfOutsideViewport(startLineNumber: number, endLineNumber: number): void {
-		this._sendRevealRange({
-			startLineNumber: startLineNumber,
-			startColumn: 1,
-			endLineNumber: endLineNumber,
-			endColumn: 1
-		}, EditorCommon.VerticalRevealType.CenterIfOutsideViewport, false);
+	public revealRangeInCenterIfOutsideViewport(range: IRange, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealRange(
+			range,
+			VerticalRevealType.CenterIfOutsideViewport,
+			true,
+			scrollType
+		);
 	}
 
-	public revealRange(range: EditorCommon.IRange, revealVerticalInCenter:boolean = false, revealHorizontal:boolean = false): void {
-		this._sendRevealRange(range, revealVerticalInCenter ? EditorCommon.VerticalRevealType.Center : EditorCommon.VerticalRevealType.Simple, revealHorizontal);
+	public revealRangeAtTop(range: IRange, scrollType: editorCommon.ScrollType = editorCommon.ScrollType.Smooth): void {
+		this._revealRange(
+			range,
+			VerticalRevealType.Top,
+			true,
+			scrollType
+		);
 	}
 
-	public revealRangeInCenter(range: EditorCommon.IRange): void {
-		this._sendRevealRange(range, EditorCommon.VerticalRevealType.Center, true);
+	private _revealRange(range: IRange, verticalType: VerticalRevealType, revealHorizontal: boolean, scrollType: editorCommon.ScrollType): void {
+		if (!Range.isIRange(range)) {
+			throw new Error('Invalid arguments');
+		}
+
+		this._sendRevealRange(
+			Range.lift(range),
+			verticalType,
+			revealHorizontal,
+			scrollType
+		);
 	}
 
-	public revealRangeInCenterIfOutsideViewport(range: EditorCommon.IRange): void {
-		this._sendRevealRange(range, EditorCommon.VerticalRevealType.CenterIfOutsideViewport, true);
-	}
-
-	public setSelections(ranges: EditorCommon.ISelection[]): void {
-		if (!this.cursor) {
+	public setSelections(ranges: readonly ISelection[], source: string = 'api'): void {
+		if (!this._modelData) {
 			return;
 		}
 		if (!ranges || ranges.length === 0) {
 			throw new Error('Invalid arguments');
 		}
-		for (var i = 0, len = ranges.length; i < len; i++) {
+		for (let i = 0, len = ranges.length; i < len; i++) {
 			if (!Selection.isISelection(ranges[i])) {
 				throw new Error('Invalid arguments');
 			}
 		}
-		this.cursor.setSelections('api', ranges);
+		this._modelData.cursor.setSelections(source, ranges);
 	}
 
-	public setScrollTop(newScrollTop:number): void {
-		if (!this.hasView) {
-			return;
-		}
-		if (typeof newScrollTop !== 'number') {
-			throw new Error('Invalid arguments');
-		}
-		this._view.getCodeEditorHelper().setScrollTop(newScrollTop);
-	}
-
-	public getScrollTop(): number {
-		if (!this.hasView) {
+	public getScrollWidth(): number {
+		if (!this._modelData) {
 			return -1;
 		}
-		return this._view.getCodeEditorHelper().getScrollTop();
+		return this._modelData.viewModel.viewLayout.getScrollWidth();
 	}
-
-	public delegateVerticalScrollbarMouseDown(browserEvent:MouseEvent): void {
-		if (!this.hasView) {
-			return;
+	public getScrollLeft(): number {
+		if (!this._modelData) {
+			return -1;
 		}
-		this._view.getCodeEditorHelper().delegateVerticalScrollbarMouseDown(browserEvent);
+		return this._modelData.viewModel.viewLayout.getCurrentScrollLeft();
 	}
 
-	public setScrollLeft(newScrollLeft:number): void {
-		if (!this.hasView) {
+	public getScrollHeight(): number {
+		if (!this._modelData) {
+			return -1;
+		}
+		return this._modelData.viewModel.viewLayout.getScrollHeight();
+	}
+	public getScrollTop(): number {
+		if (!this._modelData) {
+			return -1;
+		}
+		return this._modelData.viewModel.viewLayout.getCurrentScrollTop();
+	}
+
+	public setScrollLeft(newScrollLeft: number): void {
+		if (!this._modelData) {
 			return;
 		}
 		if (typeof newScrollLeft !== 'number') {
 			throw new Error('Invalid arguments');
 		}
-		this._view.getCodeEditorHelper().setScrollLeft(newScrollLeft);
+		this._modelData.viewModel.viewLayout.setScrollPositionNow({
+			scrollLeft: newScrollLeft
+		});
 	}
-
-	public getScrollLeft(): number {
-		if (!this.hasView) {
-			return -1;
+	public setScrollTop(newScrollTop: number): void {
+		if (!this._modelData) {
+			return;
 		}
-		return this._view.getCodeEditorHelper().getScrollLeft();
-	}
-
-	public getScrollWidth(): number {
-		if (!this.hasView) {
-			return -1;
+		if (typeof newScrollTop !== 'number') {
+			throw new Error('Invalid arguments');
 		}
-		return this._view.getCodeEditorHelper().getScrollWidth();
+		this._modelData.viewModel.viewLayout.setScrollPositionNow({
+			scrollTop: newScrollTop
+		});
 	}
-
-	public getScrollHeight(): number {
-		if (!this.hasView) {
-			return -1;
+	public setScrollPosition(position: editorCommon.INewScrollPosition): void {
+		if (!this._modelData) {
+			return;
 		}
-		return this._view.getCodeEditorHelper().getScrollHeight();
+		this._modelData.viewModel.viewLayout.setScrollPositionNow(position);
 	}
 
-	public saveViewState(): EditorCommon.ICodeEditorViewState {
-		if (!this.cursor || !this.hasView) {
+	public saveViewState(): editorCommon.ICodeEditorViewState | null {
+		if (!this._modelData) {
 			return null;
 		}
-		var cursorState = this.cursor.saveState();
-		var viewState = this._view.saveState();
+		const contributionsState: { [key: string]: any } = {};
+
+		const keys = Object.keys(this._contributions);
+		for (const id of keys) {
+			const contribution = this._contributions[id];
+			if (typeof contribution.saveViewState === 'function') {
+				contributionsState[id] = contribution.saveViewState();
+			}
+		}
+
+		const cursorState = this._modelData.cursor.saveState();
+		const viewState = this._modelData.viewModel.saveState();
 		return {
 			cursorState: cursorState,
-			viewState: viewState
+			viewState: viewState,
+			contributionsState: contributionsState
 		};
 	}
 
-	public restoreViewState(state:EditorCommon.IEditorViewState): void {
-		if (!this.cursor || !this.hasView) {
+	public restoreViewState(s: editorCommon.IEditorViewState | null): void {
+		if (!this._modelData || !this._modelData.hasRealView) {
 			return;
 		}
-		var s = <any>state;
-		if (s && s.cursorState && s.viewState) {
-			var codeEditorState = <EditorCommon.ICodeEditorViewState>s;
-			var cursorState = <any>codeEditorState.cursorState;
+		const codeEditorState = s as editorCommon.ICodeEditorViewState | null;
+		if (codeEditorState && codeEditorState.cursorState && codeEditorState.viewState) {
+			const cursorState = <any>codeEditorState.cursorState;
 			if (Array.isArray(cursorState)) {
-				this.cursor.restoreState(<EditorCommon.ICursorState[]>cursorState);
+				this._modelData.cursor.restoreState(<editorCommon.ICursorState[]>cursorState);
 			} else {
 				// Backwards compatibility
-				this.cursor.restoreState([<EditorCommon.ICursorState>cursorState]);
+				this._modelData.cursor.restoreState([<editorCommon.ICursorState>cursorState]);
 			}
-			this._view.restoreState(codeEditorState.viewState);
-		}
-	}
 
-	public layout(dimension?:EditorCommon.IDimension): void {
-		this._configuration.observeReferenceElement(dimension);
+			const contributionsState = codeEditorState.contributionsState || {};
+			const keys = Object.keys(this._contributions);
+			for (let i = 0, len = keys.length; i < len; i++) {
+				const id = keys[i];
+				const contribution = this._contributions[id];
+				if (typeof contribution.restoreViewState === 'function') {
+					contribution.restoreViewState(contributionsState[id]);
+				}
+			}
+
+			const reducedState = this._modelData.viewModel.reduceRestoreState(codeEditorState.viewState);
+			this._modelData.view.restoreState(reducedState);
+		}
 	}
 
 	public onVisible(): void {
+		this._modelData?.view.refreshFocusState();
 	}
 
 	public onHide(): void {
+		this._modelData?.view.refreshFocusState();
+		this._focusTracker.refreshState();
 	}
 
-	public focus(): void {
-		if (!this.hasView) {
-			return;
+	public getContribution<T extends editorCommon.IEditorContribution>(id: string): T {
+		return <T>(this._contributions[id] || null);
+	}
+
+	public getActions(): editorCommon.IEditorAction[] {
+		const result: editorCommon.IEditorAction[] = [];
+
+		const keys = Object.keys(this._actions);
+		for (let i = 0, len = keys.length; i < len; i++) {
+			const id = keys[i];
+			result.push(this._actions[id]);
 		}
-		this._view.focus();
-	}
 
-	public beginForcedWidgetFocus(): void {
-		this.forcedWidgetFocusCount++;
-	}
-
-	public endForcedWidgetFocus(): void {
-		this.forcedWidgetFocusCount--;
-	}
-
-	public isFocused(): boolean {
-		return this.hasView && this._view.isFocused();
-	}
-
-	public getContribution(id: string): EditorCommon.IEditorContribution {
-		return this.contributions[id] || null;
-	}
-
-	public addAction(descriptor:EditorCommon.IActionDescriptor): void {
-		var action = this._instantiationService.createInstance(DynamicEditorAction, descriptor, this);
-		this.contributions[action.getId()] = action;
-	}
-
-	public getActions(): Actions.IAction[] {
-		var result: Actions.IAction[] = [];
-		var id: string;
-		for (id in this.contributions) {
-			if (this.contributions.hasOwnProperty(id)) {
-				var contribution = <any>this.contributions[id];
-				// contribution instanceof IAction
-				if (Actions.isAction(contribution)) {
-					result.push(<Actions.IAction>contribution);
-				}
-			}
-		}
 		return result;
 	}
 
-	public getAction(id:string): Actions.IAction {
-		var contribution = <any>this.contributions[id];
-		if (contribution) {
-			// contribution instanceof IAction
-			if (Actions.isAction(contribution)) {
-				return <Actions.IAction>contribution;
+	public getSupportedActions(): editorCommon.IEditorAction[] {
+		let result = this.getActions();
+
+		result = result.filter(action => action.isSupported());
+
+		return result;
+	}
+
+	public getAction(id: string): editorCommon.IEditorAction {
+		return this._actions[id] || null;
+	}
+
+	public trigger(source: string, handlerId: string, payload: any): void {
+		payload = payload || {};
+
+		// Special case for typing
+		if (handlerId === editorCommon.Handler.Type) {
+			if (!this._modelData || typeof payload.text !== 'string' || payload.text.length === 0) {
+				// nothing to do
+				return;
 			}
+			if (source === 'keyboard') {
+				this._onWillType.fire(payload.text);
+			}
+			this._modelData.cursor.trigger(source, handlerId, payload);
+			if (source === 'keyboard') {
+				this._onDidType.fire(payload.text);
+			}
+			return;
 		}
-		return null;
-	}
 
-	public trigger(source:string, handlerId:string, payload:any): void {
-		var candidate = this.getAction(handlerId);
-		if(candidate !== null) {
-			if (candidate.enabled) {
-				this._telemetryService.publicLog('editorActionInvoked', {name: candidate.label} );
-				TPromise.as(candidate.run()).done(null, Errors.onUnexpectedError);
+		// Special case for pasting
+		if (handlerId === editorCommon.Handler.Paste) {
+			if (!this._modelData || typeof payload.text !== 'string' || payload.text.length === 0) {
+				// nothing to do
+				return;
 			}
-		} else {
-			// forward to handler dispatcher
-			var r = this._configuration.handlerDispatcher.trigger(source, handlerId, payload);
-
-			if (!r) {
-//				console.warn('Returning false from ' + handlerId + ' wont do anything special...');
+			const startPosition = this._modelData.cursor.getSelection().getStartPosition();
+			this._modelData.cursor.trigger(source, handlerId, payload);
+			const endPosition = this._modelData.cursor.getSelection().getStartPosition();
+			if (source === 'keyboard') {
+				this._onDidPaste.fire(
+					new Range(startPosition.lineNumber, startPosition.column, endPosition.lineNumber, endPosition.column)
+				);
 			}
+			return;
 		}
+
+		if (handlerId === editorCommon.Handler.CompositionStart) {
+			this._onCompositionStart.fire();
+		}
+		if (handlerId === editorCommon.Handler.CompositionEnd) {
+			this._onCompositionEnd.fire();
+		}
+
+		const action = this.getAction(handlerId);
+		if (action) {
+			Promise.resolve(action.run()).then(undefined, onUnexpectedError);
+			return;
+		}
+
+		if (!this._modelData) {
+			return;
+		}
+
+		if (this._triggerEditorCommand(source, handlerId, payload)) {
+			return;
+		}
+
+		this._modelData.cursor.trigger(source, handlerId, payload);
 	}
 
-	public executeCommand(source: string, command: EditorCommon.ICommand): boolean {
-		// forward to handler dispatcher
-		return this._configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.ExecuteCommand, command);
+	private _triggerEditorCommand(source: string, handlerId: string, payload: any): boolean {
+		const command = EditorExtensionsRegistry.getEditorCommand(handlerId);
+		if (command) {
+			payload = payload || {};
+			payload.source = source;
+			this._instantiationService.invokeFunction((accessor) => {
+				Promise.resolve(command.runEditorCommand(accessor, this, payload)).then(undefined, onUnexpectedError);
+			});
+			return true;
+		}
+
+		return false;
 	}
 
-	public executeEdits(source: string, edits: EditorCommon.IIdentifiedSingleEditOperation[]): boolean {
-		if (!this.cursor) {
-			// no view, no cursor
+	public _getCursors(): ICursors | null {
+		if (!this._modelData) {
+			return null;
+		}
+		return this._modelData.cursor;
+	}
+
+	public pushUndoStop(): boolean {
+		if (!this._modelData) {
 			return false;
 		}
-		if (this._configuration.editor.readOnly) {
+		if (this._configuration.options.get(EditorOption.readOnly)) {
 			// read only editor => sorry!
 			return false;
 		}
-		this.model.pushEditOperations(this.cursor.getSelections(), edits, () => {
-			return this.cursor.getSelections();
-		});
+		this._modelData.model.pushStackElement();
 		return true;
 	}
 
-	public executeCommands(source: string, commands: EditorCommon.ICommand[]): boolean {
-		// forward to handler dispatcher
-		return this._configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.ExecuteCommands, commands);
+	public executeEdits(source: string, edits: IIdentifiedSingleEditOperation[], endCursorState?: ICursorStateComputer | Selection[]): boolean {
+		if (!this._modelData) {
+			return false;
+		}
+		if (this._configuration.options.get(EditorOption.readOnly)) {
+			// read only editor => sorry!
+			return false;
+		}
+
+		let cursorStateComputer: ICursorStateComputer;
+		if (!endCursorState) {
+			cursorStateComputer = () => null;
+		} else if (Array.isArray(endCursorState)) {
+			cursorStateComputer = () => endCursorState;
+		} else {
+			cursorStateComputer = endCursorState;
+		}
+
+		this._modelData.cursor.executeEdits(source, edits, cursorStateComputer);
+		return true;
 	}
 
-	public addContentWidget(widget: EditorBrowser.IContentWidget): void {
-		var widgetData: EditorBrowser.IContentWidgetData = {
-			widget: widget,
-			position: widget.getPosition()
-		};
-
-		if (this.contentWidgets.hasOwnProperty(widget.getId())) {
-			console.warn('Overwriting a content widget with the same id.');
+	public executeCommand(source: string, command: editorCommon.ICommand): void {
+		if (!this._modelData) {
+			return;
 		}
-
-		this.contentWidgets[widget.getId()] = widgetData;
-
-		if (this.hasView) {
-			this._view.addContentWidget(widgetData);
-		}
+		this._modelData.cursor.trigger(source, editorCommon.Handler.ExecuteCommand, command);
 	}
 
-	public layoutContentWidget(widget: EditorBrowser.IContentWidget): void {
-		var widgetId = widget.getId();
-		if (this.contentWidgets.hasOwnProperty(widgetId)) {
-			var widgetData = this.contentWidgets[widgetId];
-			widgetData.position = widget.getPosition();
-			if (this.hasView) {
-				this._view.layoutContentWidget(widgetData);
-			}
+	public executeCommands(source: string, commands: editorCommon.ICommand[]): void {
+		if (!this._modelData) {
+			return;
 		}
+		this._modelData.cursor.trigger(source, editorCommon.Handler.ExecuteCommands, commands);
 	}
 
-	public removeContentWidget(widget: EditorBrowser.IContentWidget): void {
-		var widgetId = widget.getId();
-		if (this.contentWidgets.hasOwnProperty(widgetId)) {
-			var widgetData = this.contentWidgets[widgetId];
-			delete this.contentWidgets[widgetId];
-			if (this.hasView) {
-				this._view.removeContentWidget(widgetData);
-			}
-		}
-	}
-
-	public addOverlayWidget(widget: EditorBrowser.IOverlayWidget): void {
-		var widgetData: EditorBrowser.IOverlayWidgetData = {
-			widget: widget,
-			position: widget.getPosition()
-		};
-
-		if (this.overlayWidgets.hasOwnProperty(widget.getId())) {
-			console.warn('Overwriting an overlay widget with the same id.');
-		}
-
-		this.overlayWidgets[widget.getId()] = widgetData;
-
-		if (this.hasView) {
-			this._view.addOverlayWidget(widgetData);
-		}
-	}
-
-	public layoutOverlayWidget(widget: EditorBrowser.IOverlayWidget): void {
-		var widgetId = widget.getId();
-		if (this.overlayWidgets.hasOwnProperty(widgetId)) {
-			var widgetData = this.overlayWidgets[widgetId];
-			widgetData.position = widget.getPosition();
-			if (this.hasView) {
-				this._view.layoutOverlayWidget(widgetData);
-			}
-		}
-	}
-
-	public removeOverlayWidget(widget: EditorBrowser.IOverlayWidget): void {
-		var widgetId = widget.getId();
-		if (this.overlayWidgets.hasOwnProperty(widgetId)) {
-			var widgetData = this.overlayWidgets[widgetId];
-			delete this.overlayWidgets[widgetId];
-			if (this.hasView) {
-				this._view.removeOverlayWidget(widgetData);
-			}
-		}
-	}
-
-	public changeDecorations(callback:(changeAccessor:EditorCommon.IModelDecorationsChangeAccessor)=>any): any {
-		if (!this.model) {
-//			console.warn('Cannot change decorations on editor that is not attached to a model');
+	public changeDecorations(callback: (changeAccessor: IModelDecorationsChangeAccessor) => any): any {
+		if (!this._modelData) {
 			// callback will not be called
 			return null;
 		}
-		return this.model.changeDecorations(callback, this.id);
+		return this._modelData.model.changeDecorations(callback, this._id);
 	}
 
-	public getLineDecorations(lineNumber: number): EditorCommon.IModelDecoration[] {
-		if (!this.model) {
+	public getLineDecorations(lineNumber: number): IModelDecoration[] | null {
+		if (!this._modelData) {
 			return null;
 		}
-		return this.model.getLineDecorations(lineNumber, this.id, this._configuration.editor.readOnly);
+		return this._modelData.model.getLineDecorations(lineNumber, this._id, this._configuration.options.get(EditorOption.readOnly));
 	}
 
-	public deltaDecorations(oldDecorations:string[], newDecorations:EditorCommon.IModelDeltaDecoration[]): string[] {
-		if (!this.model) {
+	public deltaDecorations(oldDecorations: string[], newDecorations: IModelDeltaDecoration[]): string[] {
+		if (!this._modelData) {
 			return [];
 		}
 
@@ -844,495 +1054,824 @@ export class CodeEditorWidget extends EventEmitter.EventEmitter implements Actio
 			return oldDecorations;
 		}
 
-		return this.model.deltaDecorations(oldDecorations, newDecorations, this.id);
+		return this._modelData.model.deltaDecorations(oldDecorations, newDecorations, this._id);
 	}
 
-	public setDecorations(decorationTypeKey: string, ranges:EditorCommon.IRangeWithMessage[]): void {
-		var opts = this._codeEditorService.resolveDecorationType(decorationTypeKey);
-		var oldDecorationIds = this._decorationTypeKeysToIds[decorationTypeKey] || [];
-		this._decorationTypeKeysToIds[decorationTypeKey] = this.deltaDecorations(oldDecorationIds, ranges.map((r) : EditorCommon.IModelDeltaDecoration => {
-			let decOpts: EditorCommon.IModelDecorationOptions;
-			if (r.hoverMessage) {
-				decOpts = Objects.clone(opts);
-				decOpts.htmlMessage = r.hoverMessage;
-			} else {
-				decOpts = opts;
+	public setDecorations(decorationTypeKey: string, decorationOptions: editorCommon.IDecorationOptions[]): void {
+
+		const newDecorationsSubTypes: { [key: string]: boolean } = {};
+		const oldDecorationsSubTypes = this._decorationTypeSubtypes[decorationTypeKey] || {};
+		this._decorationTypeSubtypes[decorationTypeKey] = newDecorationsSubTypes;
+
+		const newModelDecorations: IModelDeltaDecoration[] = [];
+
+		for (let decorationOption of decorationOptions) {
+			let typeKey = decorationTypeKey;
+			if (decorationOption.renderOptions) {
+				// identify custom reder options by a hash code over all keys and values
+				// For custom render options register a decoration type if necessary
+				const subType = hash(decorationOption.renderOptions).toString(16);
+				// The fact that `decorationTypeKey` appears in the typeKey has no influence
+				// it is just a mechanism to get predictable and unique keys (repeatable for the same options and unique across clients)
+				typeKey = decorationTypeKey + '-' + subType;
+				if (!oldDecorationsSubTypes[subType] && !newDecorationsSubTypes[subType]) {
+					// decoration type did not exist before, register new one
+					this._registerDecorationType(typeKey, decorationOption.renderOptions, decorationTypeKey);
+				}
+				newDecorationsSubTypes[subType] = true;
 			}
-			return {
-				range: r.range,
-				options: decOpts
-			};
-		}));
+			const opts = this._resolveDecorationOptions(typeKey, !!decorationOption.hoverMessage);
+			if (decorationOption.hoverMessage) {
+				opts.hoverMessage = decorationOption.hoverMessage;
+			}
+			newModelDecorations.push({ range: decorationOption.range, options: opts });
+		}
+
+		// remove decoration sub types that are no longer used, deregister decoration type if necessary
+		for (let subType in oldDecorationsSubTypes) {
+			if (!newDecorationsSubTypes[subType]) {
+				this._removeDecorationType(decorationTypeKey + '-' + subType);
+			}
+		}
+
+		// update all decorations
+		const oldDecorationsIds = this._decorationTypeKeysToIds[decorationTypeKey] || [];
+		this._decorationTypeKeysToIds[decorationTypeKey] = this.deltaDecorations(oldDecorationsIds, newModelDecorations);
+	}
+
+	public setDecorationsFast(decorationTypeKey: string, ranges: IRange[]): void {
+
+		// remove decoration sub types that are no longer used, deregister decoration type if necessary
+		const oldDecorationsSubTypes = this._decorationTypeSubtypes[decorationTypeKey] || {};
+		for (let subType in oldDecorationsSubTypes) {
+			this._removeDecorationType(decorationTypeKey + '-' + subType);
+		}
+		this._decorationTypeSubtypes[decorationTypeKey] = {};
+
+		const opts = ModelDecorationOptions.createDynamic(this._resolveDecorationOptions(decorationTypeKey, false));
+		const newModelDecorations: IModelDeltaDecoration[] = new Array<IModelDeltaDecoration>(ranges.length);
+		for (let i = 0, len = ranges.length; i < len; i++) {
+			newModelDecorations[i] = { range: ranges[i], options: opts };
+		}
+
+		// update all decorations
+		const oldDecorationsIds = this._decorationTypeKeysToIds[decorationTypeKey] || [];
+		this._decorationTypeKeysToIds[decorationTypeKey] = this.deltaDecorations(oldDecorationsIds, newModelDecorations);
 	}
 
 	public removeDecorations(decorationTypeKey: string): void {
+		// remove decorations for type and sub type
+		const oldDecorationsIds = this._decorationTypeKeysToIds[decorationTypeKey];
+		if (oldDecorationsIds) {
+			this.deltaDecorations(oldDecorationsIds, []);
+		}
 		if (this._decorationTypeKeysToIds.hasOwnProperty(decorationTypeKey)) {
-			this.deltaDecorations(this._decorationTypeKeysToIds[decorationTypeKey], []);
 			delete this._decorationTypeKeysToIds[decorationTypeKey];
 		}
+		if (this._decorationTypeSubtypes.hasOwnProperty(decorationTypeKey)) {
+			delete this._decorationTypeSubtypes[decorationTypeKey];
+		}
 	}
 
-	public changeViewZones(callback:(accessor:EditorBrowser.IViewZoneChangeAccessor)=>void): void {
-		if (!this.hasView) {
-//			console.warn('Cannot change view zones on editor that is not attached to a model, since there is no view.');
+	public getLayoutInfo(): EditorLayoutInfo {
+		const options = this._configuration.options;
+		const layoutInfo = options.get(EditorOption.layoutInfo);
+		return layoutInfo;
+	}
+
+	public createOverviewRuler(cssClassName: string): editorBrowser.IOverviewRuler | null {
+		if (!this._modelData || !this._modelData.hasRealView) {
+			return null;
+		}
+		return this._modelData.view.createOverviewRuler(cssClassName);
+	}
+
+	public getDomNode(): HTMLElement | null {
+		if (!this._modelData || !this._modelData.hasRealView) {
+			return null;
+		}
+		return this._modelData.view.domNode.domNode;
+	}
+
+	public delegateVerticalScrollbarMouseDown(browserEvent: IMouseEvent): void {
+		if (!this._modelData || !this._modelData.hasRealView) {
 			return;
 		}
-		var hasChanges = this._view.change(callback);
-		if (hasChanges) {
-			this.emit(EditorCommon.EventType.ViewZonesChanged);
-		}
+		this._modelData.view.delegateVerticalScrollbarMouseDown(browserEvent);
 	}
 
-	public getWhitespaces(): EditorCommon.IEditorWhitespace[] {
-		if (!this.hasView) {
-			return [];
-		}
-		return this._view.getWhitespaces();
+	public layout(dimension?: editorCommon.IDimension): void {
+		this._configuration.observeReferenceElement(dimension);
+		this.render();
 	}
 
-	public addTypingListener(character:string, callback: () => void): EventEmitter.ListenerUnbind {
-		if (!this.cursor) {
-			return () => {
-				// no-op
-			};
+	public focus(): void {
+		if (!this._modelData || !this._modelData.hasRealView) {
+			return;
 		}
-		this.cursor.addTypingListener(character, callback);
-		return () => {
-			if (this.cursor) {
-				this.cursor.removeTypingListener(character, callback);
-			}
+		this._modelData.view.focus();
+	}
+
+	public hasTextFocus(): boolean {
+		if (!this._modelData || !this._modelData.hasRealView) {
+			return false;
+		}
+		return this._modelData.view.isFocused();
+	}
+
+	public hasWidgetFocus(): boolean {
+		return this._focusTracker && this._focusTracker.hasFocus();
+	}
+
+	public addContentWidget(widget: editorBrowser.IContentWidget): void {
+		const widgetData: IContentWidgetData = {
+			widget: widget,
+			position: widget.getPosition()
 		};
-	}
 
-	public getTopForLineNumber(lineNumber: number): number {
-		if (!this.hasView) {
-			return -1;
+		if (this._contentWidgets.hasOwnProperty(widget.getId())) {
+			console.warn('Overwriting a content widget with the same id.');
 		}
-		return this._view.getCodeEditorHelper().getVerticalOffsetForPosition(lineNumber, 1);
-	}
 
-	public getTopForPosition(lineNumber: number, column: number): number {
-		if (!this.hasView) {
-			return -1;
+		this._contentWidgets[widget.getId()] = widgetData;
+
+		if (this._modelData && this._modelData.hasRealView) {
+			this._modelData.view.addContentWidget(widgetData);
 		}
-		return this._view.getCodeEditorHelper().getVerticalOffsetForPosition(lineNumber, column);
 	}
 
-	public getScrolledVisiblePosition(rawPosition:EditorCommon.IPosition): { top:number; left:number; height:number; } {
-		if (!this.hasView) {
+	public layoutContentWidget(widget: editorBrowser.IContentWidget): void {
+		const widgetId = widget.getId();
+		if (this._contentWidgets.hasOwnProperty(widgetId)) {
+			const widgetData = this._contentWidgets[widgetId];
+			widgetData.position = widget.getPosition();
+			if (this._modelData && this._modelData.hasRealView) {
+				this._modelData.view.layoutContentWidget(widgetData);
+			}
+		}
+	}
+
+	public removeContentWidget(widget: editorBrowser.IContentWidget): void {
+		const widgetId = widget.getId();
+		if (this._contentWidgets.hasOwnProperty(widgetId)) {
+			const widgetData = this._contentWidgets[widgetId];
+			delete this._contentWidgets[widgetId];
+			if (this._modelData && this._modelData.hasRealView) {
+				this._modelData.view.removeContentWidget(widgetData);
+			}
+		}
+	}
+
+	public addOverlayWidget(widget: editorBrowser.IOverlayWidget): void {
+		const widgetData: IOverlayWidgetData = {
+			widget: widget,
+			position: widget.getPosition()
+		};
+
+		if (this._overlayWidgets.hasOwnProperty(widget.getId())) {
+			console.warn('Overwriting an overlay widget with the same id.');
+		}
+
+		this._overlayWidgets[widget.getId()] = widgetData;
+
+		if (this._modelData && this._modelData.hasRealView) {
+			this._modelData.view.addOverlayWidget(widgetData);
+		}
+	}
+
+	public layoutOverlayWidget(widget: editorBrowser.IOverlayWidget): void {
+		const widgetId = widget.getId();
+		if (this._overlayWidgets.hasOwnProperty(widgetId)) {
+			const widgetData = this._overlayWidgets[widgetId];
+			widgetData.position = widget.getPosition();
+			if (this._modelData && this._modelData.hasRealView) {
+				this._modelData.view.layoutOverlayWidget(widgetData);
+			}
+		}
+	}
+
+	public removeOverlayWidget(widget: editorBrowser.IOverlayWidget): void {
+		const widgetId = widget.getId();
+		if (this._overlayWidgets.hasOwnProperty(widgetId)) {
+			const widgetData = this._overlayWidgets[widgetId];
+			delete this._overlayWidgets[widgetId];
+			if (this._modelData && this._modelData.hasRealView) {
+				this._modelData.view.removeOverlayWidget(widgetData);
+			}
+		}
+	}
+
+	public changeViewZones(callback: (accessor: editorBrowser.IViewZoneChangeAccessor) => void): void {
+		if (!this._modelData || !this._modelData.hasRealView) {
+			return;
+		}
+		const hasChanges = this._modelData.view.change(callback);
+		if (hasChanges) {
+			this._onDidChangeViewZones.fire();
+		}
+	}
+
+	public getTargetAtClientPoint(clientX: number, clientY: number): editorBrowser.IMouseTarget | null {
+		if (!this._modelData || !this._modelData.hasRealView) {
+			return null;
+		}
+		return this._modelData.view.getTargetAtClientPoint(clientX, clientY);
+	}
+
+	public getScrolledVisiblePosition(rawPosition: IPosition): { top: number; left: number; height: number; } | null {
+		if (!this._modelData || !this._modelData.hasRealView) {
 			return null;
 		}
 
-		var position = this.model.validatePosition(rawPosition);
-		var helper = this._view.getCodeEditorHelper();
-		var layoutInfo = this._configuration.editor.layoutInfo;
+		const position = this._modelData.model.validatePosition(rawPosition);
+		const options = this._configuration.options;
+		const layoutInfo = options.get(EditorOption.layoutInfo);
 
-		var top = helper.getVerticalOffsetForPosition(position.lineNumber, position.column) - helper.getScrollTop();
-		var left = helper.getOffsetForColumn(position.lineNumber, position.column) + layoutInfo.glyphMarginWidth + layoutInfo.lineNumbersWidth + layoutInfo.decorationsWidth - helper.getScrollLeft();
+		const top = CodeEditorWidget._getVerticalOffsetForPosition(this._modelData, position.lineNumber, position.column) - this.getScrollTop();
+		const left = this._modelData.view.getOffsetForColumn(position.lineNumber, position.column) + layoutInfo.glyphMarginWidth + layoutInfo.lineNumbersWidth + layoutInfo.decorationsWidth - this.getScrollLeft();
 
 		return {
 			top: top,
 			left: left,
-			height: this._configuration.editor.lineHeight
+			height: options.get(EditorOption.lineHeight)
 		};
 	}
 
-	public getOffsetForColumn(lineNumber:number, column:number): number {
-		if (!this.hasView) {
+	public getOffsetForColumn(lineNumber: number, column: number): number {
+		if (!this._modelData || !this._modelData.hasRealView) {
 			return -1;
 		}
-		return this._view.getCodeEditorHelper().getOffsetForColumn(lineNumber, column);
+		return this._modelData.view.getOffsetForColumn(lineNumber, column);
 	}
 
-	public getLayoutInfo(): EditorCommon.IEditorLayoutInfo {
-		return this._configuration.editor.layoutInfo;
-	}
-
-	_attachModel(model:EditorCommon.IModel): void {
-		this.model = model ? model : null;
-		this.listenersToRemove = [];
-		this._view = null;
-		this.viewModel = null;
-		this.cursor = null;
-
-		if (this.model) {
-			this._configuration.resetIndentationOptions();
-			this.domElement.setAttribute('data-mode-id', this.model.getMode().getId());
-			this._langIdKey.set(this.model.getMode().getId());
-			this.model.setStopLineTokenizationAfter(this._configuration.editor.stopLineTokenizationAfter);
-			this._configuration.setIsDominatedByLongLines(this.model.isDominatedByLongLines(this._configuration.editor.longLineBoundary));
-
-			this.model.onBeforeAttached();
-
-			var hardWrappingLineMapperFactory = new CharacterHardWrappingLineMapper.CharacterHardWrappingLineMapperFactory(
-				this._configuration.editor.wordWrapBreakBeforeCharacters,
-				this._configuration.editor.wordWrapBreakAfterCharacters,
-				this._configuration.editor.wordWrapBreakObtrusiveCharacters
-			);
-
-			var linesCollection = new SplitLinesCollection.SplitLinesCollection(
-				this.model,
-				hardWrappingLineMapperFactory,
-				this._configuration.getIndentationOptions().tabSize,
-				this._configuration.editor.wrappingInfo.wrappingColumn,
-				this._configuration.editor.typicalFullwidthCharacterWidth / this._configuration.editor.typicalHalfwidthCharacterWidth,
-				EditorCommon.wrappingIndentFromString(this._configuration.editor.wrappingIndent)
-			);
-
-			this.viewModel = new ViewModel.ViewModel(
-				linesCollection,
-				this.id,
-				this._configuration,
-				this.model,
-				() => {
-					if (this._view) {
-						return this._view.getCenteredRangeInViewport();
-					}
-					return null;
-				}
-			);
-
-			var viewModelHelper:OneCursor.IViewModelHelper = {
-				viewModel: this.viewModel,
-				convertModelPositionToViewPosition: (lineNumber:number, column:number) => {
-					return this.viewModel.convertModelPositionToViewPosition(lineNumber, column);
-				},
-				convertModelRangeToViewRange: (modelRange:EditorCommon.IEditorRange) => {
-					return this.viewModel.convertModelRangeToViewRange(modelRange);
-				},
-				convertViewToModelPosition: (lineNumber:number, column:number) => {
-					return this.viewModel.convertViewPositionToModelPosition(lineNumber, column);
-				},
-				validateViewPosition: (viewLineNumber:number, viewColumn:number, modelPosition:EditorCommon.IEditorPosition) => {
-					return this.viewModel.validateViewPosition(viewLineNumber, viewColumn, modelPosition);
-				},
-				validateViewRange: (viewStartLineNumber:number, viewStartColumn:number, viewEndLineNumber:number, viewEndColumn:number, modelRange:EditorCommon.IEditorRange) => {
-					return this.viewModel.validateViewRange(viewStartLineNumber, viewStartColumn, viewEndLineNumber, viewEndColumn, modelRange);
-				}
-			};
-
-			this.cursor = new Cursor.Cursor(
-				this.id,
-				this._configuration,
-				this.model,
-				viewModelHelper,
-				Browser.enableEmptySelectionClipboard
-			);
-
-			this.viewModel.addEventSource(this.cursor);
-
-			this._view = new ViewImpl.View(
-				this.id,
-				this._configuration,
-				this.viewModel,
-				this._keybindingService
-			);
-
-			this.listenersToRemove.push(this._view.getInternalEventBus().addBulkListener((events) => {
-				for (var i = 0, len = events.length; i < len; i++) {
-					var eventType = events[i].getType();
-					var e = events[i].getData();
-
-					switch (eventType) {
-						case EditorCommon.EventType.ViewFocusGained:
-							this.emit(EditorCommon.EventType.EditorTextFocus);
-							// In IE, the focus is not synchronous, so we give it a little help
-							this.emit(EditorCommon.EventType.EditorFocus, {});
-							break;
-
-						case 'scroll':
-							this.emit('scroll', e);
-							break;
-
-						case 'scrollSize':
-							this.emit('scrollSize', e);
-							break;
-
-						case EditorCommon.EventType.ViewFocusLost:
-							this.emit(EditorCommon.EventType.EditorTextBlur);
-							break;
-
-						case EditorCommon.EventType.ContextMenu:
-							this.emit(EditorCommon.EventType.ContextMenu, e);
-							break;
-
-						case EditorCommon.EventType.MouseDown:
-							this.emit(EditorCommon.EventType.MouseDown, e);
-							break;
-
-						case EditorCommon.EventType.MouseUp:
-							this.emit(EditorCommon.EventType.MouseUp, e);
-							break;
-
-						case EditorCommon.EventType.KeyUp:
-							this.emit(EditorCommon.EventType.KeyUp, e);
-							break;
-
-						case EditorCommon.EventType.MouseMove:
-							this.emit(EditorCommon.EventType.MouseMove, e);
-							break;
-
-						case EditorCommon.EventType.MouseLeave:
-							this.emit(EditorCommon.EventType.MouseLeave, e);
-							break;
-
-						case EditorCommon.EventType.KeyDown:
-							this.emit(EditorCommon.EventType.KeyDown, e);
-							break;
-
-						case EditorCommon.EventType.ViewLayoutChanged:
-							this.emit(EditorCommon.EventType.EditorLayout, e);
-							break;
-
-						default:
-//							console.warn("Unhandled view event: ", e);
-					}
-				}
-			}));
-
-			this.listenersToRemove.push(this.model.addBulkListener((events) => {
-				for (var i = 0, len = events.length; i < len; i++) {
-					var eventType = events[i].getType();
-					var e = events[i].getData();
-
-					switch (eventType) {
-						case EditorCommon.EventType.ModelDecorationsChanged:
-							this.emit(EditorCommon.EventType.ModelDecorationsChanged, e);
-							break;
-
-						case EditorCommon.EventType.ModelModeChanged:
-							this.domElement.setAttribute('data-mode-id', this.model.getMode().getId());
-							this._langIdKey.set(this.model.getMode().getId());
-							this.emit(EditorCommon.EventType.ModelModeChanged, e);
-							break;
-
-						case EditorCommon.EventType.ModelModeSupportChanged:
-							this.emit(EditorCommon.EventType.ModelModeSupportChanged, e);
-							break;
-
-						case EditorCommon.EventType.ModelContentChanged:
-							// TODO@Alex
-							this.emit(EditorCommon.EventType.ModelContentChanged, e);
-							this.emit('change', {});
-							break;
-
-						case EditorCommon.EventType.ModelDispose:
-							// Someone might destroy the model from under the editor, so prevent any exceptions by setting a null model
-							this.setModel(null);
-							break;
-
-						default:
-//							console.warn("Unhandled model event: ", e);
-					}
-				}
-			}));
-
-			var _hasNonEmptySelection = (e: EditorCommon.ICursorSelectionChangedEvent) => {
-				var allSelections = [e.selection].concat(e.secondarySelections);
-				return allSelections.some(s => !s.isEmpty());
-			};
-
-			this.listenersToRemove.push(this.cursor.addBulkListener((events) => {
-				var updateHasMultipleCursors = false,
-					hasMultipleCursors = false,
-					updateHasNonEmptySelection = false,
-					hasNonEmptySelection = false;
-
-				for (var i = 0, len = events.length; i < len; i++) {
-					var eventType = events[i].getType();
-					var e = events[i].getData();
-
-					switch (eventType) {
-						case EditorCommon.EventType.CursorPositionChanged:
-							var cursorPositionChangedEvent = <EditorCommon.ICursorPositionChangedEvent>e;
-							updateHasMultipleCursors = true;
-							hasMultipleCursors = (cursorPositionChangedEvent.secondaryPositions.length > 0);
-							this.emit(EditorCommon.EventType.CursorPositionChanged, e);
-							break;
-
-						case EditorCommon.EventType.CursorSelectionChanged:
-							var cursorSelectionChangedEvent = <EditorCommon.ICursorSelectionChangedEvent>e;
-							updateHasMultipleCursors = true;
-							hasMultipleCursors = (cursorSelectionChangedEvent.secondarySelections.length > 0);
-							updateHasNonEmptySelection = true;
-							hasNonEmptySelection = _hasNonEmptySelection(cursorSelectionChangedEvent);
-							this.emit(EditorCommon.EventType.CursorSelectionChanged, e);
-							break;
-
-						default:
-//							console.warn("Unhandled cursor event: ", e);
-					}
-				}
-
-				if (updateHasMultipleCursors) {
-					if (hasMultipleCursors) {
-						this._hasMultipleSelectionsKey.set(true);
-					} else {
-						this._hasMultipleSelectionsKey.reset();
-					}
-				}
-				if (updateHasNonEmptySelection) {
-					if (hasNonEmptySelection) {
-						this._hasNonEmptySelectionKey.set(true);
-					} else {
-						this._hasNonEmptySelectionKey.reset();
-					}
-				}
-			}));
-
-			this.domElement.appendChild(this._view.domNode);
-
-			this._view.renderOnce(() => {
-
-				var widgetId:string;
-				for (widgetId in this.contentWidgets) {
-					if (this.contentWidgets.hasOwnProperty(widgetId)) {
-						this._view.addContentWidget(this.contentWidgets[widgetId]);
-					}
-				}
-
-				for (widgetId in this.overlayWidgets) {
-					if (this.overlayWidgets.hasOwnProperty(widgetId)) {
-						this._view.addOverlayWidget(this.overlayWidgets[widgetId]);
-					}
-				}
-
-				this._view.render();
-				this.hasView = true;
-			});
-		} else {
-			this.hasView = false;
+	public render(forceRedraw: boolean = false): void {
+		if (!this._modelData || !this._modelData.hasRealView) {
+			return;
 		}
+		this._modelData.view.render(true, forceRedraw);
 	}
 
-	_postDetachModelCleanup(detachedModel:EditorCommon.IModel): void {
-		if (detachedModel) {
-			this._decorationTypeKeysToIds = {};
-			detachedModel.removeAllDecorationsWithOwnerId(this.id);
-		}
+	public applyFontInfo(target: HTMLElement): void {
+		Configuration.applyFontInfoSlow(target, this._configuration.options.get(EditorOption.fontInfo));
 	}
 
-	private _detachModel(): EditorCommon.IModel {
-		if (this.model) {
-			this.model.onBeforeDetached();
-		}
-
-		this.hasView = false;
-
-		this.listenersToRemove.forEach((element) => {
-			element();
-		});
-		this.listenersToRemove = [];
-
-		if (this.cursor) {
-			this.cursor.dispose();
-			this.cursor = null;
-		}
-
-		var removeDomNode:HTMLElement = null;
-
-		if (this._view) {
-			this._view.dispose();
-			removeDomNode = this._view.domNode;
-			this._view = null;
-		}
-
-		if (this.viewModel) {
-			this.viewModel.dispose();
-			this.viewModel = null;
-		}
-
-		var result = this.model;
-		this.model = null;
-
-		if (removeDomNode) {
-			this.domElement.removeChild(removeDomNode);
-		}
-
-		this.domElement.removeAttribute('data-mode-id');
-
-		return result;
-	}
-}
-
-class OverlayWidget2 implements EditorBrowser.IOverlayWidget {
-
-	private _id: string;
-	private _position: EditorBrowser.IOverlayWidgetPosition;
-	private _domNode: HTMLElement;
-
-	constructor(id:string, position:EditorBrowser.IOverlayWidgetPosition) {
-		this._id = id;
-		this._position = position;
-		this._domNode = document.createElement('div');
-		this._domNode.className = this._id.replace(/\./g, '-').replace(/[^a-z0-9\-]/,'');
-	}
-
-	public getId(): string {
-		return this._id;
-	}
-
-	public getDomNode(): HTMLElement {
-		return this._domNode;
-	}
-
-	public getPosition(): EditorBrowser.IOverlayWidgetPosition {
-		return this._position;
-	}
-}
-
-export enum EditCursorState {
-	EndOfLastEditOperation = 0
-}
-
-export class CommandRunner implements EditorCommon.ICommand {
-
-	private _ops: EditorCommon.ISingleEditOperation[];
-	private _editCursorState: EditCursorState;
-
-	constructor(ops: EditorCommon.ISingleEditOperation[], editCursorState: EditCursorState) {
-		this._ops = ops;
-		this._editCursorState = editCursorState;
-	}
-
-	public getEditOperations(model: EditorCommon.ITokenizedModel, builder: EditorCommon.IEditOperationBuilder): void {
-		if (this._ops.length === 0) {
+	protected _attachModel(model: ITextModel | null): void {
+		if (!model) {
+			this._modelData = null;
 			return;
 		}
 
-		// Sort them in ascending order by range starts
-		this._ops.sort((o1, o2) => {
-			return Range.compareRangesUsingStarts(o1.range, o2.range);
-		});
+		const listenersToRemove: IDisposable[] = [];
 
-		// Merge operations that touch each other
-		var resultOps:EditorCommon.ISingleEditOperation[] = [];
-		var previousOp = this._ops[0];
-		for (var i = 1; i < this._ops.length; i++) {
-			if (previousOp.range.endLineNumber === this._ops[i].range.startLineNumber && previousOp.range.endColumn === this._ops[i].range.startColumn) {
-				// These operations are one after another and can be merged
-				previousOp.range = Range.plusRange(previousOp.range, this._ops[i].range);
-				previousOp.text = previousOp.text + this._ops[i].text;
-			} else {
-				resultOps.push(previousOp);
-				previousOp = this._ops[i];
+		this._domElement.setAttribute('data-mode-id', model.getLanguageIdentifier().language);
+		this._configuration.setIsDominatedByLongLines(model.isDominatedByLongLines());
+		this._configuration.setMaxLineNumber(model.getLineCount());
+
+		model.onBeforeAttached();
+
+		const viewModel = new ViewModel(this._id, this._configuration, model, (callback) => dom.scheduleAtNextAnimationFrame(callback));
+
+		listenersToRemove.push(model.onDidChangeDecorations((e) => this._onDidChangeModelDecorations.fire(e)));
+		listenersToRemove.push(model.onDidChangeLanguage((e) => {
+			this._domElement.setAttribute('data-mode-id', model.getLanguageIdentifier().language);
+			this._onDidChangeModelLanguage.fire(e);
+		}));
+		listenersToRemove.push(model.onDidChangeLanguageConfiguration((e) => this._onDidChangeModelLanguageConfiguration.fire(e)));
+		listenersToRemove.push(model.onDidChangeContent((e) => this._onDidChangeModelContent.fire(e)));
+		listenersToRemove.push(model.onDidChangeOptions((e) => this._onDidChangeModelOptions.fire(e)));
+		// Someone might destroy the model from under the editor, so prevent any exceptions by setting a null model
+		listenersToRemove.push(model.onWillDispose(() => this.setModel(null)));
+
+		const cursor = new Cursor(this._configuration, model, viewModel);
+
+		listenersToRemove.push(cursor.onDidReachMaxCursorCount(() => {
+			this._notificationService.warn(nls.localize('cursors.maximum', "The number of cursors has been limited to {0}.", Cursor.MAX_CURSOR_COUNT));
+		}));
+
+		listenersToRemove.push(cursor.onDidAttemptReadOnlyEdit(() => {
+			this._onDidAttemptReadOnlyEdit.fire(undefined);
+		}));
+
+		listenersToRemove.push(cursor.onDidChange((e: CursorStateChangedEvent) => {
+			const positions: Position[] = [];
+			for (let i = 0, len = e.selections.length; i < len; i++) {
+				positions[i] = e.selections[i].getPosition();
 			}
-		}
-		resultOps.push(previousOp);
 
-		for (var i = 0; i < resultOps.length; i++) {
-			builder.addEditOperation(Range.lift(resultOps[i].range), resultOps[i].text);
+			const e1: ICursorPositionChangedEvent = {
+				position: positions[0],
+				secondaryPositions: positions.slice(1),
+				reason: e.reason,
+				source: e.source
+			};
+			this._onDidChangeCursorPosition.fire(e1);
+
+			const e2: ICursorSelectionChangedEvent = {
+				selection: e.selections[0],
+				secondarySelections: e.selections.slice(1),
+				modelVersionId: e.modelVersionId,
+				oldSelections: e.oldSelections,
+				oldModelVersionId: e.oldModelVersionId,
+				source: e.source,
+				reason: e.reason
+			};
+			this._onDidChangeCursorSelection.fire(e2);
+		}));
+
+		const [view, hasRealView] = this._createView(viewModel, cursor);
+		if (hasRealView) {
+			this._domElement.appendChild(view.domNode.domNode);
+
+			let keys = Object.keys(this._contentWidgets);
+			for (let i = 0, len = keys.length; i < len; i++) {
+				const widgetId = keys[i];
+				view.addContentWidget(this._contentWidgets[widgetId]);
+			}
+
+			keys = Object.keys(this._overlayWidgets);
+			for (let i = 0, len = keys.length; i < len; i++) {
+				const widgetId = keys[i];
+				view.addOverlayWidget(this._overlayWidgets[widgetId]);
+			}
+
+			view.render(false, true);
+			view.domNode.domNode.setAttribute('data-uri', model.uri.toString());
+		}
+
+		this._modelData = new ModelData(model, viewModel, cursor, view, hasRealView, listenersToRemove);
+	}
+
+	protected _createView(viewModel: ViewModel, cursor: Cursor): [View, boolean] {
+		let commandDelegate: ICommandDelegate;
+		if (this.isSimpleWidget) {
+			commandDelegate = {
+				executeEditorCommand: (editorCommand: CoreEditorCommand, args: any): void => {
+					editorCommand.runCoreEditorCommand(cursor, args);
+				},
+				paste: (source: string, text: string, pasteOnNewLine: boolean, multicursorText: string[] | null) => {
+					this.trigger(source, editorCommon.Handler.Paste, { text, pasteOnNewLine, multicursorText });
+				},
+				type: (source: string, text: string) => {
+					this.trigger(source, editorCommon.Handler.Type, { text });
+				},
+				replacePreviousChar: (source: string, text: string, replaceCharCnt: number) => {
+					this.trigger(source, editorCommon.Handler.ReplacePreviousChar, { text, replaceCharCnt });
+				},
+				compositionStart: (source: string) => {
+					this.trigger(source, editorCommon.Handler.CompositionStart, undefined);
+				},
+				compositionEnd: (source: string) => {
+					this.trigger(source, editorCommon.Handler.CompositionEnd, undefined);
+				},
+				cut: (source: string) => {
+					this.trigger(source, editorCommon.Handler.Cut, undefined);
+				}
+			};
+		} else {
+			commandDelegate = {
+				executeEditorCommand: (editorCommand: CoreEditorCommand, args: any): void => {
+					editorCommand.runCoreEditorCommand(cursor, args);
+				},
+				paste: (source: string, text: string, pasteOnNewLine: boolean, multicursorText: string[] | null) => {
+					this._commandService.executeCommand(editorCommon.Handler.Paste, {
+						text: text,
+						pasteOnNewLine: pasteOnNewLine,
+						multicursorText: multicursorText
+					});
+				},
+				type: (source: string, text: string) => {
+					this._commandService.executeCommand(editorCommon.Handler.Type, {
+						text: text
+					});
+				},
+				replacePreviousChar: (source: string, text: string, replaceCharCnt: number) => {
+					this._commandService.executeCommand(editorCommon.Handler.ReplacePreviousChar, {
+						text: text,
+						replaceCharCnt: replaceCharCnt
+					});
+				},
+				compositionStart: (source: string) => {
+					this._commandService.executeCommand(editorCommon.Handler.CompositionStart, {});
+				},
+				compositionEnd: (source: string) => {
+					this._commandService.executeCommand(editorCommon.Handler.CompositionEnd, {});
+				},
+				cut: (source: string) => {
+					this._commandService.executeCommand(editorCommon.Handler.Cut, {});
+				}
+			};
+		}
+
+		const viewOutgoingEvents = new ViewOutgoingEvents(viewModel);
+		viewOutgoingEvents.onDidScroll = (e) => this._onDidScrollChange.fire(e);
+		viewOutgoingEvents.onDidGainFocus = () => this._editorTextFocus.setValue(true);
+		viewOutgoingEvents.onDidLoseFocus = () => this._editorTextFocus.setValue(false);
+		viewOutgoingEvents.onContextMenu = (e) => this._onContextMenu.fire(e);
+		viewOutgoingEvents.onMouseDown = (e) => this._onMouseDown.fire(e);
+		viewOutgoingEvents.onMouseUp = (e) => this._onMouseUp.fire(e);
+		viewOutgoingEvents.onMouseDrag = (e) => this._onMouseDrag.fire(e);
+		viewOutgoingEvents.onMouseDrop = (e) => this._onMouseDrop.fire(e);
+		viewOutgoingEvents.onKeyUp = (e) => this._onKeyUp.fire(e);
+		viewOutgoingEvents.onMouseMove = (e) => this._onMouseMove.fire(e);
+		viewOutgoingEvents.onMouseLeave = (e) => this._onMouseLeave.fire(e);
+		viewOutgoingEvents.onMouseWheel = (e) => this._onMouseWheel.fire(e);
+		viewOutgoingEvents.onKeyDown = (e) => this._onKeyDown.fire(e);
+
+		const view = new View(
+			commandDelegate,
+			this._configuration,
+			this._themeService,
+			viewModel,
+			cursor,
+			viewOutgoingEvents
+		);
+
+		return [view, true];
+	}
+
+	protected _postDetachModelCleanup(detachedModel: ITextModel | null): void {
+		if (detachedModel) {
+			detachedModel.removeAllDecorationsWithOwnerId(this._id);
 		}
 	}
 
-	public computeCursorState(model: EditorCommon.ITokenizedModel, helper: EditorCommon.ICursorStateComputerData): EditorCommon.IEditorSelection {
-		var inverseEditOperations = helper.getInverseEditOperations();
-		var srcRange = inverseEditOperations[inverseEditOperations.length - 1].range;
-		return Selection.createSelection(
-			srcRange.endLineNumber,
-			srcRange.endColumn,
-			srcRange.endLineNumber,
-			srcRange.endColumn
-		);
+	private _detachModel(): ITextModel | null {
+		if (!this._modelData) {
+			return null;
+		}
+		const model = this._modelData.model;
+		const removeDomNode = this._modelData.hasRealView ? this._modelData.view.domNode.domNode : null;
+
+		this._modelData.dispose();
+		this._modelData = null;
+
+		this._domElement.removeAttribute('data-mode-id');
+		if (removeDomNode) {
+			this._domElement.removeChild(removeDomNode);
+		}
+
+		return model;
+	}
+
+	private _registerDecorationType(key: string, options: editorCommon.IDecorationRenderOptions, parentTypeKey?: string): void {
+		this._codeEditorService.registerDecorationType(key, options, parentTypeKey);
+	}
+
+	private _removeDecorationType(key: string): void {
+		this._codeEditorService.removeDecorationType(key);
+	}
+
+	private _resolveDecorationOptions(typeKey: string, writable: boolean): IModelDecorationOptions {
+		return this._codeEditorService.resolveDecorationOptions(typeKey, writable);
+	}
+
+	public getTelemetryData(): { [key: string]: any; } | undefined {
+		return this._telemetryData;
+	}
+
+	public hasModel(): this is editorBrowser.IActiveCodeEditor {
+		return (this._modelData !== null);
 	}
 }
+
+const enum BooleanEventValue {
+	NotSet,
+	False,
+	True
+}
+
+export class BooleanEventEmitter extends Disposable {
+	private readonly _onDidChangeToTrue: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onDidChangeToTrue: Event<void> = this._onDidChangeToTrue.event;
+
+	private readonly _onDidChangeToFalse: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onDidChangeToFalse: Event<void> = this._onDidChangeToFalse.event;
+
+	private _value: BooleanEventValue;
+
+	constructor() {
+		super();
+		this._value = BooleanEventValue.NotSet;
+	}
+
+	public setValue(_value: boolean) {
+		const value = (_value ? BooleanEventValue.True : BooleanEventValue.False);
+		if (this._value === value) {
+			return;
+		}
+		this._value = value;
+		if (this._value === BooleanEventValue.True) {
+			this._onDidChangeToTrue.fire();
+		} else if (this._value === BooleanEventValue.False) {
+			this._onDidChangeToFalse.fire();
+		}
+	}
+}
+
+class EditorContextKeysManager extends Disposable {
+
+	private readonly _editor: CodeEditorWidget;
+	private readonly _editorFocus: IContextKey<boolean>;
+	private readonly _textInputFocus: IContextKey<boolean>;
+	private readonly _editorTextFocus: IContextKey<boolean>;
+	private readonly _editorTabMovesFocus: IContextKey<boolean>;
+	private readonly _editorReadonly: IContextKey<boolean>;
+	private readonly _hasMultipleSelections: IContextKey<boolean>;
+	private readonly _hasNonEmptySelection: IContextKey<boolean>;
+	private readonly _canUndo: IContextKey<boolean>;
+	private readonly _canRedo: IContextKey<boolean>;
+
+	constructor(
+		editor: CodeEditorWidget,
+		contextKeyService: IContextKeyService
+	) {
+		super();
+
+		this._editor = editor;
+
+		contextKeyService.createKey('editorId', editor.getId());
+		this._editorFocus = EditorContextKeys.focus.bindTo(contextKeyService);
+		this._textInputFocus = EditorContextKeys.textInputFocus.bindTo(contextKeyService);
+		this._editorTextFocus = EditorContextKeys.editorTextFocus.bindTo(contextKeyService);
+		this._editorTabMovesFocus = EditorContextKeys.tabMovesFocus.bindTo(contextKeyService);
+		this._editorReadonly = EditorContextKeys.readOnly.bindTo(contextKeyService);
+		this._hasMultipleSelections = EditorContextKeys.hasMultipleSelections.bindTo(contextKeyService);
+		this._hasNonEmptySelection = EditorContextKeys.hasNonEmptySelection.bindTo(contextKeyService);
+		this._canUndo = EditorContextKeys.canUndo.bindTo(contextKeyService);
+		this._canRedo = EditorContextKeys.canRedo.bindTo(contextKeyService);
+
+		this._register(this._editor.onDidChangeConfiguration(() => this._updateFromConfig()));
+		this._register(this._editor.onDidChangeCursorSelection(() => this._updateFromSelection()));
+		this._register(this._editor.onDidFocusEditorWidget(() => this._updateFromFocus()));
+		this._register(this._editor.onDidBlurEditorWidget(() => this._updateFromFocus()));
+		this._register(this._editor.onDidFocusEditorText(() => this._updateFromFocus()));
+		this._register(this._editor.onDidBlurEditorText(() => this._updateFromFocus()));
+		this._register(this._editor.onDidChangeModel(() => this._updateFromModel()));
+		this._register(this._editor.onDidChangeConfiguration(() => this._updateFromModel()));
+
+		this._updateFromConfig();
+		this._updateFromSelection();
+		this._updateFromFocus();
+		this._updateFromModel();
+	}
+
+	private _updateFromConfig(): void {
+		const options = this._editor.getOptions();
+
+		this._editorTabMovesFocus.set(options.get(EditorOption.tabFocusMode));
+		this._editorReadonly.set(options.get(EditorOption.readOnly));
+	}
+
+	private _updateFromSelection(): void {
+		const selections = this._editor.getSelections();
+		if (!selections) {
+			this._hasMultipleSelections.reset();
+			this._hasNonEmptySelection.reset();
+		} else {
+			this._hasMultipleSelections.set(selections.length > 1);
+			this._hasNonEmptySelection.set(selections.some(s => !s.isEmpty()));
+		}
+	}
+
+	private _updateFromFocus(): void {
+		this._editorFocus.set(this._editor.hasWidgetFocus() && !this._editor.isSimpleWidget);
+		this._editorTextFocus.set(this._editor.hasTextFocus() && !this._editor.isSimpleWidget);
+		this._textInputFocus.set(this._editor.hasTextFocus());
+	}
+
+	private _updateFromModel(): void {
+		const model = this._editor.getModel();
+		this._canUndo.set(Boolean(model && model.canUndo()));
+		this._canRedo.set(Boolean(model && model.canRedo()));
+	}
+}
+
+export class EditorModeContext extends Disposable {
+
+	private readonly _langId: IContextKey<string>;
+	private readonly _hasCompletionItemProvider: IContextKey<boolean>;
+	private readonly _hasCodeActionsProvider: IContextKey<boolean>;
+	private readonly _hasCodeLensProvider: IContextKey<boolean>;
+	private readonly _hasDefinitionProvider: IContextKey<boolean>;
+	private readonly _hasDeclarationProvider: IContextKey<boolean>;
+	private readonly _hasImplementationProvider: IContextKey<boolean>;
+	private readonly _hasTypeDefinitionProvider: IContextKey<boolean>;
+	private readonly _hasHoverProvider: IContextKey<boolean>;
+	private readonly _hasDocumentHighlightProvider: IContextKey<boolean>;
+	private readonly _hasDocumentSymbolProvider: IContextKey<boolean>;
+	private readonly _hasReferenceProvider: IContextKey<boolean>;
+	private readonly _hasRenameProvider: IContextKey<boolean>;
+	private readonly _hasDocumentFormattingProvider: IContextKey<boolean>;
+	private readonly _hasDocumentSelectionFormattingProvider: IContextKey<boolean>;
+	private readonly _hasMultipleDocumentFormattingProvider: IContextKey<boolean>;
+	private readonly _hasMultipleDocumentSelectionFormattingProvider: IContextKey<boolean>;
+	private readonly _hasSignatureHelpProvider: IContextKey<boolean>;
+	private readonly _isInWalkThrough: IContextKey<boolean>;
+
+	constructor(
+		private readonly _editor: CodeEditorWidget,
+		private readonly _contextKeyService: IContextKeyService
+	) {
+		super();
+
+		this._langId = EditorContextKeys.languageId.bindTo(_contextKeyService);
+		this._hasCompletionItemProvider = EditorContextKeys.hasCompletionItemProvider.bindTo(_contextKeyService);
+		this._hasCodeActionsProvider = EditorContextKeys.hasCodeActionsProvider.bindTo(_contextKeyService);
+		this._hasCodeLensProvider = EditorContextKeys.hasCodeLensProvider.bindTo(_contextKeyService);
+		this._hasDefinitionProvider = EditorContextKeys.hasDefinitionProvider.bindTo(_contextKeyService);
+		this._hasDeclarationProvider = EditorContextKeys.hasDeclarationProvider.bindTo(_contextKeyService);
+		this._hasImplementationProvider = EditorContextKeys.hasImplementationProvider.bindTo(_contextKeyService);
+		this._hasTypeDefinitionProvider = EditorContextKeys.hasTypeDefinitionProvider.bindTo(_contextKeyService);
+		this._hasHoverProvider = EditorContextKeys.hasHoverProvider.bindTo(_contextKeyService);
+		this._hasDocumentHighlightProvider = EditorContextKeys.hasDocumentHighlightProvider.bindTo(_contextKeyService);
+		this._hasDocumentSymbolProvider = EditorContextKeys.hasDocumentSymbolProvider.bindTo(_contextKeyService);
+		this._hasReferenceProvider = EditorContextKeys.hasReferenceProvider.bindTo(_contextKeyService);
+		this._hasRenameProvider = EditorContextKeys.hasRenameProvider.bindTo(_contextKeyService);
+		this._hasSignatureHelpProvider = EditorContextKeys.hasSignatureHelpProvider.bindTo(_contextKeyService);
+		this._hasDocumentFormattingProvider = EditorContextKeys.hasDocumentFormattingProvider.bindTo(_contextKeyService);
+		this._hasDocumentSelectionFormattingProvider = EditorContextKeys.hasDocumentSelectionFormattingProvider.bindTo(_contextKeyService);
+		this._hasMultipleDocumentFormattingProvider = EditorContextKeys.hasMultipleDocumentFormattingProvider.bindTo(_contextKeyService);
+		this._hasMultipleDocumentSelectionFormattingProvider = EditorContextKeys.hasMultipleDocumentSelectionFormattingProvider.bindTo(_contextKeyService);
+		this._isInWalkThrough = EditorContextKeys.isInEmbeddedEditor.bindTo(_contextKeyService);
+
+		const update = () => this._update();
+
+		// update when model/mode changes
+		this._register(_editor.onDidChangeModel(update));
+		this._register(_editor.onDidChangeModelLanguage(update));
+
+		// update when registries change
+		this._register(modes.CompletionProviderRegistry.onDidChange(update));
+		this._register(modes.CodeActionProviderRegistry.onDidChange(update));
+		this._register(modes.CodeLensProviderRegistry.onDidChange(update));
+		this._register(modes.DefinitionProviderRegistry.onDidChange(update));
+		this._register(modes.DeclarationProviderRegistry.onDidChange(update));
+		this._register(modes.ImplementationProviderRegistry.onDidChange(update));
+		this._register(modes.TypeDefinitionProviderRegistry.onDidChange(update));
+		this._register(modes.HoverProviderRegistry.onDidChange(update));
+		this._register(modes.DocumentHighlightProviderRegistry.onDidChange(update));
+		this._register(modes.DocumentSymbolProviderRegistry.onDidChange(update));
+		this._register(modes.ReferenceProviderRegistry.onDidChange(update));
+		this._register(modes.RenameProviderRegistry.onDidChange(update));
+		this._register(modes.DocumentFormattingEditProviderRegistry.onDidChange(update));
+		this._register(modes.DocumentRangeFormattingEditProviderRegistry.onDidChange(update));
+		this._register(modes.SignatureHelpProviderRegistry.onDidChange(update));
+
+		update();
+	}
+
+	dispose() {
+		super.dispose();
+	}
+
+	reset() {
+		this._contextKeyService.bufferChangeEvents(() => {
+			this._langId.reset();
+			this._hasCompletionItemProvider.reset();
+			this._hasCodeActionsProvider.reset();
+			this._hasCodeLensProvider.reset();
+			this._hasDefinitionProvider.reset();
+			this._hasDeclarationProvider.reset();
+			this._hasImplementationProvider.reset();
+			this._hasTypeDefinitionProvider.reset();
+			this._hasHoverProvider.reset();
+			this._hasDocumentHighlightProvider.reset();
+			this._hasDocumentSymbolProvider.reset();
+			this._hasReferenceProvider.reset();
+			this._hasRenameProvider.reset();
+			this._hasDocumentFormattingProvider.reset();
+			this._hasDocumentSelectionFormattingProvider.reset();
+			this._hasSignatureHelpProvider.reset();
+			this._isInWalkThrough.reset();
+		});
+	}
+
+	private _update() {
+		const model = this._editor.getModel();
+		if (!model) {
+			this.reset();
+			return;
+		}
+		this._contextKeyService.bufferChangeEvents(() => {
+			this._langId.set(model.getLanguageIdentifier().language);
+			this._hasCompletionItemProvider.set(modes.CompletionProviderRegistry.has(model));
+			this._hasCodeActionsProvider.set(modes.CodeActionProviderRegistry.has(model));
+			this._hasCodeLensProvider.set(modes.CodeLensProviderRegistry.has(model));
+			this._hasDefinitionProvider.set(modes.DefinitionProviderRegistry.has(model));
+			this._hasDeclarationProvider.set(modes.DeclarationProviderRegistry.has(model));
+			this._hasImplementationProvider.set(modes.ImplementationProviderRegistry.has(model));
+			this._hasTypeDefinitionProvider.set(modes.TypeDefinitionProviderRegistry.has(model));
+			this._hasHoverProvider.set(modes.HoverProviderRegistry.has(model));
+			this._hasDocumentHighlightProvider.set(modes.DocumentHighlightProviderRegistry.has(model));
+			this._hasDocumentSymbolProvider.set(modes.DocumentSymbolProviderRegistry.has(model));
+			this._hasReferenceProvider.set(modes.ReferenceProviderRegistry.has(model));
+			this._hasRenameProvider.set(modes.RenameProviderRegistry.has(model));
+			this._hasSignatureHelpProvider.set(modes.SignatureHelpProviderRegistry.has(model));
+			this._hasDocumentFormattingProvider.set(modes.DocumentFormattingEditProviderRegistry.has(model) || modes.DocumentRangeFormattingEditProviderRegistry.has(model));
+			this._hasDocumentSelectionFormattingProvider.set(modes.DocumentRangeFormattingEditProviderRegistry.has(model));
+			this._hasMultipleDocumentFormattingProvider.set(modes.DocumentFormattingEditProviderRegistry.all(model).length + modes.DocumentRangeFormattingEditProviderRegistry.all(model).length > 1);
+			this._hasMultipleDocumentSelectionFormattingProvider.set(modes.DocumentRangeFormattingEditProviderRegistry.all(model).length > 1);
+			this._isInWalkThrough.set(model.uri.scheme === Schemas.walkThroughSnippet);
+		});
+	}
+}
+
+class CodeEditorWidgetFocusTracker extends Disposable {
+
+	private _hasFocus: boolean;
+	private readonly _domFocusTracker: dom.IFocusTracker;
+
+	private readonly _onChange: Emitter<void> = this._register(new Emitter<void>());
+	public readonly onChange: Event<void> = this._onChange.event;
+
+	constructor(domElement: HTMLElement) {
+		super();
+
+		this._hasFocus = false;
+		this._domFocusTracker = this._register(dom.trackFocus(domElement));
+
+		this._register(this._domFocusTracker.onDidFocus(() => {
+			this._hasFocus = true;
+			this._onChange.fire(undefined);
+		}));
+		this._register(this._domFocusTracker.onDidBlur(() => {
+			this._hasFocus = false;
+			this._onChange.fire(undefined);
+		}));
+	}
+
+	public hasFocus(): boolean {
+		return this._hasFocus;
+	}
+
+	public refreshState(): void {
+		if (this._domFocusTracker.refreshState) {
+			this._domFocusTracker.refreshState();
+		}
+	}
+}
+
+const squigglyStart = encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 3' enable-background='new 0 0 6 3' height='3' width='6'><g fill='`);
+const squigglyEnd = encodeURIComponent(`'><polygon points='5.5,0 2.5,3 1.1,3 4.1,0'/><polygon points='4,0 6,2 6,0.6 5.4,0'/><polygon points='0,2 1,3 2.4,3 0,0.6'/></g></svg>`);
+
+function getSquigglySVGData(color: Color) {
+	return squigglyStart + encodeURIComponent(color.toString()) + squigglyEnd;
+}
+
+const dotdotdotStart = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" height="3" width="12"><g fill="`);
+const dotdotdotEnd = encodeURIComponent(`"><circle cx="1" cy="1" r="1"/><circle cx="5" cy="1" r="1"/><circle cx="9" cy="1" r="1"/></g></svg>`);
+
+function getDotDotDotSVGData(color: Color) {
+	return dotdotdotStart + encodeURIComponent(color.toString()) + dotdotdotEnd;
+}
+
+registerThemingParticipant((theme, collector) => {
+	const errorBorderColor = theme.getColor(editorErrorBorder);
+	if (errorBorderColor) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorErrorDecoration} { border-bottom: 4px double ${errorBorderColor}; }`);
+	}
+	const errorForeground = theme.getColor(editorErrorForeground);
+	if (errorForeground) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorErrorDecoration} { background: url("data:image/svg+xml,${getSquigglySVGData(errorForeground)}") repeat-x bottom left; }`);
+	}
+
+	const warningBorderColor = theme.getColor(editorWarningBorder);
+	if (warningBorderColor) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorWarningDecoration} { border-bottom: 4px double ${warningBorderColor}; }`);
+	}
+	const warningForeground = theme.getColor(editorWarningForeground);
+	if (warningForeground) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorWarningDecoration} { background: url("data:image/svg+xml,${getSquigglySVGData(warningForeground)}") repeat-x bottom left; }`);
+	}
+
+	const infoBorderColor = theme.getColor(editorInfoBorder);
+	if (infoBorderColor) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorInfoDecoration} { border-bottom: 4px double ${infoBorderColor}; }`);
+	}
+	const infoForeground = theme.getColor(editorInfoForeground);
+	if (infoForeground) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorInfoDecoration} { background: url("data:image/svg+xml,${getSquigglySVGData(infoForeground)}") repeat-x bottom left; }`);
+	}
+
+	const hintBorderColor = theme.getColor(editorHintBorder);
+	if (hintBorderColor) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorHintDecoration} { border-bottom: 2px dotted ${hintBorderColor}; }`);
+	}
+	const hintForeground = theme.getColor(editorHintForeground);
+	if (hintForeground) {
+		collector.addRule(`.monaco-editor .${ClassName.EditorHintDecoration} { background: url("data:image/svg+xml,${getDotDotDotSVGData(hintForeground)}") no-repeat bottom left; }`);
+	}
+
+	const unnecessaryForeground = theme.getColor(editorUnnecessaryCodeOpacity);
+	if (unnecessaryForeground) {
+		collector.addRule(`.monaco-editor.showUnused .${ClassName.EditorUnnecessaryInlineDecoration} { opacity: ${unnecessaryForeground.rgba.a}; }`);
+	}
+
+	const unnecessaryBorder = theme.getColor(editorUnnecessaryCodeBorder);
+	if (unnecessaryBorder) {
+		collector.addRule(`.monaco-editor.showUnused .${ClassName.EditorUnnecessaryDecoration} { border-bottom: 2px dashed ${unnecessaryBorder}; }`);
+	}
+
+	const deprecatedForeground = theme.getColor(editorForeground) || 'inherit';
+	collector.addRule(`.monaco-editor .${ClassName.EditorDeprecatedInlineDecoration} { text-decoration: line-through; text-decoration-color: ${deprecatedForeground}}`);
+});

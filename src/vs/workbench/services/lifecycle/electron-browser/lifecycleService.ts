@@ -2,104 +2,136 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import nls = require('vs/nls');
-import {Promise, TPromise} from 'vs/base/common/winjs.base';
-import errors = require('vs/base/common/errors');
-import {IMessageService} from 'vs/platform/message/common/message';
-import {BaseLifecycleService} from 'vs/platform/lifecycle/common/baseLifecycleService';
-import {IWindowService} from 'vs/workbench/services/window/electron-browser/windowService';
-import severity from 'vs/base/common/severity';
+import { toErrorMessage } from 'vs/base/common/errorMessage';
+import { ShutdownReason, StartupKind, handleVetos, ILifecycleService } from 'vs/platform/lifecycle/common/lifecycle';
+import { IStorageService, StorageScope, WillSaveStateReason } from 'vs/platform/storage/common/storage';
+import { ipcRenderer as ipc } from 'electron';
+import { IElectronEnvironmentService } from 'vs/workbench/services/electron/electron-browser/electronEnvironmentService';
+import { ILogService } from 'vs/platform/log/common/log';
+import { INotificationService } from 'vs/platform/notification/common/notification';
+import { onUnexpectedError } from 'vs/base/common/errors';
+import { AbstractLifecycleService } from 'vs/platform/lifecycle/common/lifecycleService';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
 
-import ipc = require('ipc');
+export class NativeLifecycleService extends AbstractLifecycleService {
 
-export class LifecycleService extends BaseLifecycleService {
+	private static readonly LAST_SHUTDOWN_REASON_KEY = 'lifecyle.lastShutdownReason';
+
+	_serviceBrand: undefined;
+
+	private shutdownReason: ShutdownReason | undefined;
 
 	constructor(
-		private messageService: IMessageService,
-		private windowService: IWindowService
+		@INotificationService private readonly notificationService: INotificationService,
+		@IElectronEnvironmentService private readonly electronEnvironmentService: IElectronEnvironmentService,
+		@IStorageService readonly storageService: IStorageService,
+		@ILogService readonly logService: ILogService
 	) {
-		super();
+		super(logService);
+
+		this._startupKind = this.resolveStartupKind();
 
 		this.registerListeners();
 	}
 
+	private resolveStartupKind(): StartupKind {
+		const lastShutdownReason = this.storageService.getNumber(NativeLifecycleService.LAST_SHUTDOWN_REASON_KEY, StorageScope.WORKSPACE);
+		this.storageService.remove(NativeLifecycleService.LAST_SHUTDOWN_REASON_KEY, StorageScope.WORKSPACE);
+
+		let startupKind: StartupKind;
+		if (lastShutdownReason === ShutdownReason.RELOAD) {
+			startupKind = StartupKind.ReloadedWindow;
+		} else if (lastShutdownReason === ShutdownReason.LOAD) {
+			startupKind = StartupKind.ReopenedWindow;
+		} else {
+			startupKind = StartupKind.NewWindow;
+		}
+
+		this.logService.trace(`lifecycle: starting up (startup kind: ${this._startupKind})`);
+
+		return startupKind;
+	}
+
 	private registerListeners(): void {
-		let windowId = this.windowService.getWindowId();
+		const windowId = this.electronEnvironmentService.windowId;
 
 		// Main side indicates that window is about to unload, check for vetos
-		ipc.on('vscode:beforeUnload', (reply: { okChannel: string, cancelChannel: string }) => {
-			let veto = this.beforeUnload();
+		ipc.on('vscode:onBeforeUnload', (_event: unknown, reply: { okChannel: string, cancelChannel: string, reason: ShutdownReason }) => {
+			this.logService.trace(`lifecycle: onBeforeUnload (reason: ${reply.reason})`);
 
-			if (typeof veto === 'boolean') {
-				ipc.send(veto ? reply.cancelChannel : reply.okChannel, windowId);
-			}
+			// trigger onBeforeShutdown events and veto collecting
+			this.handleBeforeShutdown(reply.reason).then(veto => {
+				if (veto) {
+					this.logService.trace('lifecycle: onBeforeUnload prevented via veto');
 
-			else {
-				veto.done(v => ipc.send(v ? reply.cancelChannel : reply.okChannel, windowId));
+					ipc.send(reply.cancelChannel, windowId);
+				} else {
+					this.logService.trace('lifecycle: onBeforeUnload continues without veto');
+
+					this.shutdownReason = reply.reason;
+					ipc.send(reply.okChannel, windowId);
+				}
+			});
+		});
+
+		// Main side indicates that we will indeed shutdown
+		ipc.on('vscode:onWillUnload', async (_event: unknown, reply: { replyChannel: string, reason: ShutdownReason }) => {
+			this.logService.trace(`lifecycle: onWillUnload (reason: ${reply.reason})`);
+
+			// trigger onWillShutdown events and joining
+			await this.handleWillShutdown(reply.reason);
+
+			// trigger onShutdown event now that we know we will quit
+			this._onShutdown.fire();
+
+			// acknowledge to main side
+			ipc.send(reply.replyChannel, windowId);
+		});
+
+		// Save shutdown reason to retrieve on next startup
+		this.storageService.onWillSaveState(e => {
+			if (e.reason === WillSaveStateReason.SHUTDOWN) {
+				this.storageService.store(NativeLifecycleService.LAST_SHUTDOWN_REASON_KEY, this.shutdownReason, StorageScope.WORKSPACE);
 			}
 		});
 	}
 
-	private beforeUnload(): boolean|TPromise<boolean> {
-		let veto = this.vetoShutdown();
+	private handleBeforeShutdown(reason: ShutdownReason): Promise<boolean> {
+		const vetos: (boolean | Promise<boolean>)[] = [];
 
-		if (typeof veto === 'boolean') {
-			return this.handleVeto(veto);
-		}
+		this._onBeforeShutdown.fire({
+			veto(value) {
+				vetos.push(value);
+			},
+			reason
+		});
 
-		else {
-			return veto.then(v => this.handleVeto(v));
-		}
+		return handleVetos(vetos, err => {
+			this.notificationService.error(toErrorMessage(err));
+			onUnexpectedError(err);
+		});
 	}
 
-	private handleVeto(veto: boolean): boolean {
-		if (!veto) {
-			try {
-				this.fireShutdown();
-			} catch (error) {
-				errors.onUnexpectedError(error); // unexpected program error and we cause shutdown to cancel in this case
+	private async handleWillShutdown(reason: ShutdownReason): Promise<void> {
+		const joiners: Promise<void>[] = [];
 
-				return false;
-			}
-		}
-
-		return veto;
-	}
-
-	private vetoShutdown(): boolean|TPromise<boolean> {
-		let participants = this.beforeShutdownParticipants;
-		let vetoPromises: TPromise<void>[] = [];
-		let hasPromiseWithVeto = false;
-
-		for (let i = 0; i < participants.length; i++) {
-			let participantVeto = participants[i].beforeShutdown();
-			if (participantVeto === true) {
-				return true; // return directly when any veto was provided
-			}
-
-			else if (participantVeto === false) {
-				continue; // skip
-			}
-
-			// We have a promise
-			let vetoPromise = (<TPromise<boolean>>participantVeto).then(veto => {
-				if (veto) {
-					hasPromiseWithVeto = true;
+		this._onWillShutdown.fire({
+			join(promise) {
+				if (promise) {
+					joiners.push(promise);
 				}
-			}, (error) => {
-				hasPromiseWithVeto = true;
-				this.messageService.show(severity.Error, errors.toErrorMessage(error));
-			});
+			},
+			reason
+		});
 
-			vetoPromises.push(vetoPromise);
+		try {
+			await Promise.all(joiners);
+		} catch (error) {
+			this.notificationService.error(toErrorMessage(error));
+			onUnexpectedError(error);
 		}
-
-		if (vetoPromises.length === 0) {
-			return false; // return directly when no veto was provided
-		}
-
-		return Promise.join(vetoPromises).then(() => hasPromiseWithVeto);
 	}
 }
+
+registerSingleton(ILifecycleService, NativeLifecycleService);

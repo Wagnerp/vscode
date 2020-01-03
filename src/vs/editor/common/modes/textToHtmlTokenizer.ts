@@ -2,128 +2,128 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import Strings = require('vs/base/common/strings');
-import {NullState, nullTokenize} from 'vs/editor/common/modes/nullMode';
-import Modes = require('vs/editor/common/modes');
-import {IHTMLContentElement} from 'vs/base/common/htmlContent';
+import { CharCode } from 'vs/base/common/charCode';
+import * as strings from 'vs/base/common/strings';
+import { IViewLineTokens, LineTokens } from 'vs/editor/common/core/lineTokens';
+import { TokenizationResult2 } from 'vs/editor/common/core/token';
+import { IState, LanguageId } from 'vs/editor/common/modes';
+import { NULL_STATE, nullTokenize2 } from 'vs/editor/common/modes/nullMode';
 
-export function tokenizeToHtmlContent(text: string, mode: Modes.IMode): IHTMLContentElement {
-	return _tokenizeToHtmlContent(text, _getSafeTokenizationSupport(mode));
+export interface IReducedTokenizationSupport {
+	getInitialState(): IState;
+	tokenize2(line: string, state: IState, offsetDelta: number): TokenizationResult2;
 }
 
-export function tokenizeToString(text: string, mode: Modes.IMode, extraTokenClass?: string): string {
-	return _tokenizeToString(text, _getSafeTokenizationSupport(mode), extraTokenClass);
+const fallback: IReducedTokenizationSupport = {
+	getInitialState: () => NULL_STATE,
+	tokenize2: (buffer: string, state: IState, deltaOffset: number) => nullTokenize2(LanguageId.Null, buffer, state, deltaOffset)
+};
+
+export function tokenizeToString(text: string, tokenizationSupport: IReducedTokenizationSupport = fallback): string {
+	return _tokenizeToString(text, tokenizationSupport || fallback);
 }
 
-function _getSafeTokenizationSupport(mode: Modes.IMode): Modes.ITokenizationSupport {
-	if (mode && mode.tokenizationSupport) {
-		return mode.tokenizationSupport;
+export function tokenizeLineToHTML(text: string, viewLineTokens: IViewLineTokens, colorMap: string[], startOffset: number, endOffset: number, tabSize: number, useNbsp: boolean): string {
+	let result = `<div>`;
+	let charIndex = startOffset;
+	let tabsCharDelta = 0;
+
+	for (let tokenIndex = 0, tokenCount = viewLineTokens.getCount(); tokenIndex < tokenCount; tokenIndex++) {
+		const tokenEndIndex = viewLineTokens.getEndOffset(tokenIndex);
+
+		if (tokenEndIndex <= startOffset) {
+			continue;
+		}
+
+		let partContent = '';
+
+		for (; charIndex < tokenEndIndex && charIndex < endOffset; charIndex++) {
+			const charCode = text.charCodeAt(charIndex);
+
+			switch (charCode) {
+				case CharCode.Tab:
+					let insertSpacesCount = tabSize - (charIndex + tabsCharDelta) % tabSize;
+					tabsCharDelta += insertSpacesCount - 1;
+					while (insertSpacesCount > 0) {
+						partContent += useNbsp ? '&#160;' : ' ';
+						insertSpacesCount--;
+					}
+					break;
+
+				case CharCode.LessThan:
+					partContent += '&lt;';
+					break;
+
+				case CharCode.GreaterThan:
+					partContent += '&gt;';
+					break;
+
+				case CharCode.Ampersand:
+					partContent += '&amp;';
+					break;
+
+				case CharCode.Null:
+					partContent += '&#00;';
+					break;
+
+				case CharCode.UTF8_BOM:
+				case CharCode.LINE_SEPARATOR_2028:
+					partContent += '\ufffd';
+					break;
+
+				case CharCode.CarriageReturn:
+					// zero width space, because carriage return would introduce a line break
+					partContent += '&#8203';
+					break;
+
+				case CharCode.Space:
+					partContent += useNbsp ? '&#160;' : ' ';
+					break;
+
+				default:
+					partContent += String.fromCharCode(charCode);
+			}
+		}
+
+		result += `<span style="${viewLineTokens.getInlineStyle(tokenIndex, colorMap)}">${partContent}</span>`;
+
+		if (tokenEndIndex > endOffset || charIndex >= endOffset) {
+			break;
+		}
 	}
-	return {
-		shouldGenerateEmbeddedModels: false,
-		getInitialState: () => new NullState(null, null),
-		tokenize: (buffer:string, state: Modes.IState, deltaOffset:number = 0, stopAtOffset?:number) => nullTokenize(null, buffer, state, deltaOffset, stopAtOffset)
-	};
-}
 
-function _tokenizeToHtmlContent(text: string, tokenizationSupport: Modes.ITokenizationSupport): IHTMLContentElement {
-	var result: IHTMLContentElement = {
-		tagName: 'div',
-		style: 'white-space: pre',
-		children: []
-	};
-
-	var emitToken = (className: string, tokenText: string) => {
-		result.children.push({
-			tagName: 'span',
-			className: className,
-			text: tokenText
-		});
-	};
-
-	var emitNewLine = () => {
-		result.children.push({
-			tagName: 'br'
-		});
-	};
-
-	_tokenizeLines(text, tokenizationSupport, emitToken, emitNewLine);
-
+	result += `</div>`;
 	return result;
 }
 
-function _tokenizeToString(text: string, tokenizationSupport: Modes.ITokenizationSupport, extraTokenClass: string = ''): string {
-	if (extraTokenClass && extraTokenClass.length > 0) {
-		extraTokenClass = ' ' + extraTokenClass;
+function _tokenizeToString(text: string, tokenizationSupport: IReducedTokenizationSupport): string {
+	let result = `<div class="monaco-tokenized-source">`;
+	let lines = text.split(/\r\n|\r|\n/);
+	let currentState = tokenizationSupport.getInitialState();
+	for (let i = 0, len = lines.length; i < len; i++) {
+		let line = lines[i];
+
+		if (i > 0) {
+			result += `<br/>`;
+		}
+
+		let tokenizationResult = tokenizationSupport.tokenize2(line, currentState, 0);
+		LineTokens.convertToEndOffset(tokenizationResult.tokens, line.length);
+		let lineTokens = new LineTokens(tokenizationResult.tokens, line);
+		let viewLineTokens = lineTokens.inflate();
+
+		let startOffset = 0;
+		for (let j = 0, lenJ = viewLineTokens.getCount(); j < lenJ; j++) {
+			const type = viewLineTokens.getClassName(j);
+			const endIndex = viewLineTokens.getEndOffset(j);
+			result += `<span class="${type}">${strings.escape(line.substring(startOffset, endIndex))}</span>`;
+			startOffset = endIndex;
+		}
+
+		currentState = tokenizationResult.endState;
 	}
 
-	var result = '';
-
-	var emitToken = (className: string, tokenText: string) => {
-		result += '<span class="' + className + extraTokenClass + '">' + Strings.escape(tokenText) + '</span>';
-	};
-
-	var emitNewLine = () => {
-		result += '<br/>';
-	};
-
-	result = '<div style="white-space: pre;">';
-	_tokenizeLines(text, tokenizationSupport, emitToken, emitNewLine);
-	result += '</div>';
-
+	result += `</div>`;
 	return result;
-}
-
-interface IEmitTokenFunc {
-	(className: string, innerText: string): void;
-}
-interface IEmitNewLineFunc {
-	(): void;
-}
-
-function _tokenizeLines(text: string, tokenizationSupport: Modes.ITokenizationSupport, emitToken: IEmitTokenFunc, emitNewLine: IEmitNewLineFunc): void {
-	var lines = text.split(/\r\n|\r|\n/);
-	var currentState = tokenizationSupport.getInitialState();
-	for (var i = 0; i < lines.length; i++) {
-		currentState = _tokenizeLine(lines[i], tokenizationSupport, emitToken, currentState);
-
-		// Keep new lines
-		if (i < lines.length - 1) {
-			emitNewLine();
-		}
-	}
-}
-
-function _tokenizeLine(line: string, tokenizationSupport:Modes.ITokenizationSupport, emitToken: IEmitTokenFunc, startState: Modes.IState): Modes.IState {
-	var tokenized = tokenizationSupport.tokenize(line, startState),
-		endState = tokenized.endState,
-		tokens = tokenized.tokens,
-		offset = 0,
-		tokenText: string;
-
-	// For each token inject spans with proper class names based on token type
-	for (var j = 0; j < tokens.length; j++) {
-		var token = tokens[j];
-
-		// Tokens only provide a startIndex from where they are valid from. As such, we need to
-		// look ahead the value of the token by advancing until the next tokens start inex or the
-		// end of the line.
-		if (j < tokens.length - 1) {
-			tokenText = line.substring(offset, tokens[j + 1].startIndex);
-			offset = tokens[j + 1].startIndex;
-		} else {
-			tokenText = line.substr(offset);
-		}
-
-		var className = 'token';
-		var safeType = token.type.replace(/[^a-z0-9\-]/gi, ' ');
-		if (safeType.length > 0) {
-			className += ' ' + safeType;
-		}
-		emitToken(className, tokenText);
-	}
-
-	return endState;
 }

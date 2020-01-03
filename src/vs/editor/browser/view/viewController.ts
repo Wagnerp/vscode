@@ -2,204 +2,323 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import EventEmitter = require('vs/base/common/eventEmitter');
-import DomUtils = require('vs/base/browser/dom');
+import { IKeyboardEvent } from 'vs/base/browser/keyboardEvent';
+import { CoreEditorCommand, CoreNavigationCommands } from 'vs/editor/browser/controller/coreCommands';
+import { IEditorMouseEvent, IPartialEditorMouseEvent } from 'vs/editor/browser/editorBrowser';
+import { ViewOutgoingEvents } from 'vs/editor/browser/view/viewOutgoingEvents';
+import { Position } from 'vs/editor/common/core/position';
+import { Selection } from 'vs/editor/common/core/selection';
+import { IConfiguration } from 'vs/editor/common/editorCommon';
+import { IViewModel } from 'vs/editor/common/viewModel/viewModel';
+import { IMouseWheelEvent } from 'vs/base/browser/mouseEvent';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
+import * as platform from 'vs/base/common/platform';
 
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import Configuration = require('vs/editor/browser/config/configuration');
-import Position = require('vs/editor/common/core/position');
-import EditorCommon = require('vs/editor/common/editorCommon');
+export interface IMouseDispatchData {
+	position: Position;
+	/**
+	 * Desired mouse column (e.g. when position.column gets clamped to text length -- clicking after text on a line).
+	 */
+	mouseColumn: number;
+	startedOnLineNumbers: boolean;
 
-export class ViewController implements EditorBrowser.IViewController {
+	inSelectionMode: boolean;
+	mouseDownCount: number;
+	altKey: boolean;
+	ctrlKey: boolean;
+	metaKey: boolean;
+	shiftKey: boolean;
 
-	private viewModel:EditorCommon.IViewModel;
-	private configuration:Configuration.Configuration;
-	private outgoingEventBus:EventEmitter.IEventEmitter;
+	leftButton: boolean;
+	middleButton: boolean;
+}
 
-	constructor(viewModel:EditorCommon.IViewModel, configuration:Configuration.Configuration, outgoingEventBus:EventEmitter.IEventEmitter) {
-		this.viewModel = viewModel;
+export interface ICommandDelegate {
+	executeEditorCommand(editorCommand: CoreEditorCommand, args: any): void;
+
+	paste(source: string, text: string, pasteOnNewLine: boolean, multicursorText: string[] | null): void;
+	type(source: string, text: string): void;
+	replacePreviousChar(source: string, text: string, replaceCharCnt: number): void;
+	compositionStart(source: string): void;
+	compositionEnd(source: string): void;
+	cut(source: string): void;
+}
+
+export class ViewController {
+
+	private readonly configuration: IConfiguration;
+	private readonly viewModel: IViewModel;
+	private readonly outgoingEvents: ViewOutgoingEvents;
+	private readonly commandDelegate: ICommandDelegate;
+
+	constructor(
+		configuration: IConfiguration,
+		viewModel: IViewModel,
+		outgoingEvents: ViewOutgoingEvents,
+		commandDelegate: ICommandDelegate
+	) {
 		this.configuration = configuration;
-		this.outgoingEventBus = outgoingEventBus;
+		this.viewModel = viewModel;
+		this.outgoingEvents = outgoingEvents;
+		this.commandDelegate = commandDelegate;
 	}
 
-	public paste(source:string, text:string, pasteOnNewLine:boolean): void {
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.Paste, {
-			text: text,
-			pasteOnNewLine: pasteOnNewLine,
+	private _execMouseCommand(editorCommand: CoreEditorCommand, args: any): void {
+		args.source = 'mouse';
+		this.commandDelegate.executeEditorCommand(editorCommand, args);
+	}
+
+	public paste(source: string, text: string, pasteOnNewLine: boolean, multicursorText: string[] | null): void {
+		this.commandDelegate.paste(source, text, pasteOnNewLine, multicursorText);
+	}
+
+	public type(source: string, text: string): void {
+		this.commandDelegate.type(source, text);
+	}
+
+	public replacePreviousChar(source: string, text: string, replaceCharCnt: number): void {
+		this.commandDelegate.replacePreviousChar(source, text, replaceCharCnt);
+	}
+
+	public compositionStart(source: string): void {
+		this.commandDelegate.compositionStart(source);
+	}
+
+	public compositionEnd(source: string): void {
+		this.commandDelegate.compositionEnd(source);
+	}
+
+	public cut(source: string): void {
+		this.commandDelegate.cut(source);
+	}
+
+	public setSelection(source: string, modelSelection: Selection): void {
+		this.commandDelegate.executeEditorCommand(CoreNavigationCommands.SetSelection, {
+			source: source,
+			selection: modelSelection
 		});
 	}
 
-	public type(source:string, text:string): void {
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.Type, {
-			text: text
-		});
-	}
-
-	public replacePreviousChar(source: string, text: string): void {
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.ReplacePreviousChar, {
-			text: text
-		});
-	}
-
-	public cut(source:string): void {
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.Cut, null);
-	}
-
-	private _validateViewColumn(lineNumber: number, column: number): number {
-		var minColumn = this.viewModel.getLineMinColumn(lineNumber);
-		if (column < minColumn) {
-			return minColumn;
+	private _validateViewColumn(viewPosition: Position): Position {
+		const minColumn = this.viewModel.getLineMinColumn(viewPosition.lineNumber);
+		if (viewPosition.column < minColumn) {
+			return new Position(viewPosition.lineNumber, minColumn);
 		}
-		return column;
+		return viewPosition;
 	}
 
-	public moveTo(source:string, lineNumber:number, column:number): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.MoveTo, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column)
+	private _hasMulticursorModifier(data: IMouseDispatchData): boolean {
+		switch (this.configuration.options.get(EditorOption.multiCursorModifier)) {
+			case 'altKey':
+				return data.altKey;
+			case 'ctrlKey':
+				return data.ctrlKey;
+			case 'metaKey':
+				return data.metaKey;
+		}
+		return false;
+	}
+
+	private _hasNonMulticursorModifier(data: IMouseDispatchData): boolean {
+		switch (this.configuration.options.get(EditorOption.multiCursorModifier)) {
+			case 'altKey':
+				return data.ctrlKey || data.metaKey;
+			case 'ctrlKey':
+				return data.altKey || data.metaKey;
+			case 'metaKey':
+				return data.ctrlKey || data.altKey;
+		}
+		return false;
+	}
+
+	public dispatchMouse(data: IMouseDispatchData): void {
+		const selectionClipboardIsOn = (platform.isLinux && this.configuration.options.get(EditorOption.selectionClipboard));
+		if (data.middleButton && !selectionClipboardIsOn) {
+			this._columnSelect(data.position, data.mouseColumn, data.inSelectionMode);
+		} else if (data.startedOnLineNumbers) {
+			// If the dragging started on the gutter, then have operations work on the entire line
+			if (this._hasMulticursorModifier(data)) {
+				if (data.inSelectionMode) {
+					this._lastCursorLineSelect(data.position);
+				} else {
+					this._createCursor(data.position, true);
+				}
+			} else {
+				if (data.inSelectionMode) {
+					this._lineSelectDrag(data.position);
+				} else {
+					this._lineSelect(data.position);
+				}
+			}
+		} else if (data.mouseDownCount >= 4) {
+			this._selectAll();
+		} else if (data.mouseDownCount === 3) {
+			if (this._hasMulticursorModifier(data)) {
+				if (data.inSelectionMode) {
+					this._lastCursorLineSelectDrag(data.position);
+				} else {
+					this._lastCursorLineSelect(data.position);
+				}
+			} else {
+				if (data.inSelectionMode) {
+					this._lineSelectDrag(data.position);
+				} else {
+					this._lineSelect(data.position);
+				}
+			}
+		} else if (data.mouseDownCount === 2) {
+			if (this._hasMulticursorModifier(data)) {
+				this._lastCursorWordSelect(data.position);
+			} else {
+				if (data.inSelectionMode) {
+					this._wordSelectDrag(data.position);
+				} else {
+					this._wordSelect(data.position);
+				}
+			}
+		} else {
+			if (this._hasMulticursorModifier(data)) {
+				if (!this._hasNonMulticursorModifier(data)) {
+					if (data.shiftKey) {
+						this._columnSelect(data.position, data.mouseColumn, true);
+					} else {
+						// Do multi-cursor operations only when purely alt is pressed
+						if (data.inSelectionMode) {
+							this._lastCursorMoveToSelect(data.position);
+						} else {
+							this._createCursor(data.position, false);
+						}
+					}
+				}
+			} else {
+				if (data.inSelectionMode) {
+					if (data.altKey) {
+						this._columnSelect(data.position, data.mouseColumn, true);
+					} else {
+						this._moveToSelect(data.position);
+					}
+				} else {
+					this.moveTo(data.position);
+				}
+			}
+		}
+	}
+
+	private _usualArgs(viewPosition: Position) {
+		viewPosition = this._validateViewColumn(viewPosition);
+		return {
+			position: this._convertViewToModelPosition(viewPosition),
+			viewPosition: viewPosition
+		};
+	}
+
+	public moveTo(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.MoveTo, this._usualArgs(viewPosition));
+	}
+
+	private _moveToSelect(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.MoveToSelect, this._usualArgs(viewPosition));
+	}
+
+	private _columnSelect(viewPosition: Position, mouseColumn: number, doColumnSelect: boolean): void {
+		viewPosition = this._validateViewColumn(viewPosition);
+		this._execMouseCommand(CoreNavigationCommands.ColumnSelect, {
+			position: this._convertViewToModelPosition(viewPosition),
+			viewPosition: viewPosition,
+			mouseColumn: mouseColumn,
+			doColumnSelect: doColumnSelect
 		});
 	}
 
-	public moveToSelect(source:string, lineNumber:number, column:number): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.MoveToSelect, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column)
-		});
-	}
-
-	public createCursor(source:string, lineNumber:number, column:number, wholeLine:boolean): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.CreateCursor, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column),
+	private _createCursor(viewPosition: Position, wholeLine: boolean): void {
+		viewPosition = this._validateViewColumn(viewPosition);
+		this._execMouseCommand(CoreNavigationCommands.CreateCursor, {
+			position: this._convertViewToModelPosition(viewPosition),
+			viewPosition: viewPosition,
 			wholeLine: wholeLine
 		});
 	}
 
-	public lastCursorMoveToSelect(source:string, lineNumber:number, column:number): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.LastCursorMoveToSelect, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column)
-		});
+	private _lastCursorMoveToSelect(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.LastCursorMoveToSelect, this._usualArgs(viewPosition));
 	}
 
-	public wordSelect(source:string, lineNumber:number, column:number, preference:string): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.WordSelect, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			preference: preference
-		});
+	private _wordSelect(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.WordSelect, this._usualArgs(viewPosition));
 	}
 
-	public wordSelectDrag(source:string, lineNumber:number, column:number, preference:string): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.WordSelectDrag, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			preference: preference
-		});
+	private _wordSelectDrag(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.WordSelectDrag, this._usualArgs(viewPosition));
 	}
 
-	public lastCursorWordSelect(source:string, lineNumber:number, column:number, preference:string): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.LastCursorWordSelect, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			preference: preference
-		});
+	private _lastCursorWordSelect(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.LastCursorWordSelect, this._usualArgs(viewPosition));
 	}
 
-	public lineSelect(source:string, lineNumber:number, column:number): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.LineSelect, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column)
-		});
+	private _lineSelect(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.LineSelect, this._usualArgs(viewPosition));
 	}
 
-	public lineSelectDrag(source:string, lineNumber:number, column:number): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.LineSelectDrag, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column)
-		});
+	private _lineSelectDrag(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.LineSelectDrag, this._usualArgs(viewPosition));
 	}
 
-	public lastCursorLineSelect(source:string, lineNumber:number, column:number): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.LastCursorLineSelect, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column)
-		});
+	private _lastCursorLineSelect(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.LastCursorLineSelect, this._usualArgs(viewPosition));
 	}
 
-	public lastCursorLineSelectDrag(source:string, lineNumber:number, column:number): void {
-		column = this._validateViewColumn(lineNumber, column);
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.LastCursorLineSelectDrag, {
-			position: this.convertViewToModelPosition(lineNumber, column),
-			viewPosition: new Position.Position(lineNumber, column)
-		});
+	private _lastCursorLineSelectDrag(viewPosition: Position): void {
+		this._execMouseCommand(CoreNavigationCommands.LastCursorLineSelectDrag, this._usualArgs(viewPosition));
 	}
 
-	public selectAll(source:string): void {
-		this.configuration.handlerDispatcher.trigger(source, EditorCommon.Handler.SelectAll, null);
+	private _selectAll(): void {
+		this._execMouseCommand(CoreNavigationCommands.SelectAll, {});
 	}
 
 	// ----------------------
 
-	private convertViewToModelPosition(lineNumber:number, column:number): EditorCommon.IEditorPosition {
-		return this.viewModel.convertViewPositionToModelPosition(lineNumber, column);
+	private _convertViewToModelPosition(viewPosition: Position): Position {
+		return this.viewModel.coordinatesConverter.convertViewPositionToModelPosition(viewPosition);
 	}
 
-	private convertViewToModelRange(viewRange:EditorCommon.IRange): EditorCommon.IEditorRange {
-		return this.viewModel.convertViewRangeToModelRange(viewRange);
+	public emitKeyDown(e: IKeyboardEvent): void {
+		this.outgoingEvents.emitKeyDown(e);
 	}
 
-	private convertViewToModelMouseEvent(e:EditorBrowser.IMouseEvent): void {
-		if (e.target) {
-			if (e.target.position) {
-				e.target.position = this.convertViewToModelPosition(e.target.position.lineNumber, e.target.position.column);
-			}
-			if (e.target.range) {
-				e.target.range = this.convertViewToModelRange(e.target.range);
-			}
-		}
+	public emitKeyUp(e: IKeyboardEvent): void {
+		this.outgoingEvents.emitKeyUp(e);
 	}
 
-	public emitKeyDown(e:DomUtils.IKeyboardEvent): void {
-		this.outgoingEventBus.emit(EditorCommon.EventType.KeyDown, e);
+	public emitContextMenu(e: IEditorMouseEvent): void {
+		this.outgoingEvents.emitContextMenu(e);
 	}
 
-	public emitKeyUp(e:DomUtils.IKeyboardEvent): void {
-		this.outgoingEventBus.emit(EditorCommon.EventType.KeyUp, e);
+	public emitMouseMove(e: IEditorMouseEvent): void {
+		this.outgoingEvents.emitMouseMove(e);
 	}
 
-	public emitContextMenu(e:EditorBrowser.IMouseEvent): void {
-		this.convertViewToModelMouseEvent(e);
-		this.outgoingEventBus.emit(EditorCommon.EventType.ContextMenu, e);
+	public emitMouseLeave(e: IPartialEditorMouseEvent): void {
+		this.outgoingEvents.emitMouseLeave(e);
 	}
 
-	public emitMouseMove(e:EditorBrowser.IMouseEvent): void {
-		this.convertViewToModelMouseEvent(e);
-		this.outgoingEventBus.emit(EditorCommon.EventType.MouseMove, e);
+	public emitMouseUp(e: IEditorMouseEvent): void {
+		this.outgoingEvents.emitMouseUp(e);
 	}
 
-	public emitMouseLeave(e:EditorBrowser.IMouseEvent): void {
-		this.convertViewToModelMouseEvent(e);
-		this.outgoingEventBus.emit(EditorCommon.EventType.MouseLeave, e);
+	public emitMouseDown(e: IEditorMouseEvent): void {
+		this.outgoingEvents.emitMouseDown(e);
 	}
 
-	public emitMouseUp(e:EditorBrowser.IMouseEvent): void {
-		this.convertViewToModelMouseEvent(e);
-		this.outgoingEventBus.emit(EditorCommon.EventType.MouseUp, e);
+	public emitMouseDrag(e: IEditorMouseEvent): void {
+		this.outgoingEvents.emitMouseDrag(e);
 	}
 
-	public emitMouseDown(e:EditorBrowser.IMouseEvent): void {
-		this.convertViewToModelMouseEvent(e);
-		this.outgoingEventBus.emit(EditorCommon.EventType.MouseDown, e);
+	public emitMouseDrop(e: IPartialEditorMouseEvent): void {
+		this.outgoingEvents.emitMouseDrop(e);
 	}
 
+	public emitMouseWheel(e: IMouseWheelEvent): void {
+		this.outgoingEvents.emitMouseWheel(e);
+	}
 }

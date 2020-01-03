@@ -3,124 +3,204 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
 import 'vs/css!./currentLineHighlight';
-import DomUtils = require('vs/base/browser/dom');
+import { DynamicViewOverlay } from 'vs/editor/browser/view/dynamicViewOverlay';
+import { editorLineHighlight, editorLineHighlightBorder } from 'vs/editor/common/view/editorColorRegistry';
+import { RenderingContext } from 'vs/editor/common/view/renderingContext';
+import { ViewContext } from 'vs/editor/common/view/viewContext';
+import * as viewEvents from 'vs/editor/common/view/viewEvents';
+import * as arrays from 'vs/base/common/arrays';
+import { registerThemingParticipant } from 'vs/platform/theme/common/themeService';
+import { Selection } from 'vs/editor/common/core/selection';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
 
-import {ViewEventHandler} from 'vs/editor/common/viewModel/viewEventHandler';
-import EditorBrowser = require('vs/editor/browser/editorBrowser');
-import EditorCommon = require('vs/editor/common/editorCommon');
+let isRenderedUsingBorder = true;
 
-export class CurrentLineHighlightOverlay extends ViewEventHandler implements EditorBrowser.IDynamicViewOverlay {
-	private _context:EditorBrowser.IViewContext;
-	private _layoutProvider:EditorBrowser.ILayoutProvider;
-	private _selectionIsEmpty:boolean;
-	private _primaryCursorIsInEditableRange:boolean;
-	private _primaryCursorLineNumber:number;
-	private _scrollWidth:number;
+export abstract class AbstractLineHighlightOverlay extends DynamicViewOverlay {
+	private readonly _context: ViewContext;
+	protected _lineHeight: number;
+	protected _renderLineHighlight: 'none' | 'gutter' | 'line' | 'all';
+	protected _contentLeft: number;
+	protected _contentWidth: number;
+	protected _selectionIsEmpty: boolean;
+	private _cursorLineNumbers: number[];
+	private _selections: Selection[];
+	private _renderData: string[] | null;
 
-	constructor(context:EditorBrowser.IViewContext, layoutProvider:EditorBrowser.ILayoutProvider) {
+	constructor(context: ViewContext) {
 		super();
 		this._context = context;
-		this._layoutProvider = layoutProvider;
 
+		const options = this._context.configuration.options;
+		const layoutInfo = options.get(EditorOption.layoutInfo);
+		this._lineHeight = options.get(EditorOption.lineHeight);
+		this._renderLineHighlight = options.get(EditorOption.renderLineHighlight);
+		this._contentLeft = layoutInfo.contentLeft;
+		this._contentWidth = layoutInfo.contentWidth;
 		this._selectionIsEmpty = true;
-		this._primaryCursorIsInEditableRange = true;
-		this._primaryCursorLineNumber = 1;
-		this._scrollWidth = this._layoutProvider.getScrollWidth();
+		this._cursorLineNumbers = [];
+		this._selections = [];
+		this._renderData = null;
 
 		this._context.addEventHandler(this);
 	}
 
 	public dispose(): void {
 		this._context.removeEventHandler(this);
-		this._context = null;
+		super.dispose();
+	}
+
+	private _readFromSelections(): boolean {
+		let hasChanged = false;
+
+		// Only render the first selection when using border
+		const renderSelections = isRenderedUsingBorder ? this._selections.slice(0, 1) : this._selections;
+
+		const cursorsLineNumbers = renderSelections.map(s => s.positionLineNumber);
+		cursorsLineNumbers.sort((a, b) => a - b);
+		if (!arrays.equals(this._cursorLineNumbers, cursorsLineNumbers)) {
+			this._cursorLineNumbers = cursorsLineNumbers;
+			hasChanged = true;
+		}
+
+		const selectionIsEmpty = renderSelections.every(s => s.isEmpty());
+		if (this._selectionIsEmpty !== selectionIsEmpty) {
+			this._selectionIsEmpty = selectionIsEmpty;
+			hasChanged = true;
+		}
+
+		return hasChanged;
 	}
 
 	// --- begin event handlers
-
-	public onModelFlushed(): boolean {
-		this._primaryCursorIsInEditableRange = true;
-		this._selectionIsEmpty = true;
-		this._primaryCursorLineNumber = 1;
-		this._scrollWidth = this._layoutProvider.getScrollWidth();
+	public onThemeChanged(e: viewEvents.ViewThemeChangedEvent): boolean {
+		return this._readFromSelections();
+	}
+	public onConfigurationChanged(e: viewEvents.ViewConfigurationChangedEvent): boolean {
+		const options = this._context.configuration.options;
+		const layoutInfo = options.get(EditorOption.layoutInfo);
+		this._lineHeight = options.get(EditorOption.lineHeight);
+		this._renderLineHighlight = options.get(EditorOption.renderLineHighlight);
+		this._contentLeft = layoutInfo.contentLeft;
+		this._contentWidth = layoutInfo.contentWidth;
 		return true;
 	}
-	public onModelLinesDeleted(e:EditorCommon.IViewLinesDeletedEvent): boolean {
+	public onCursorStateChanged(e: viewEvents.ViewCursorStateChangedEvent): boolean {
+		this._selections = e.selections;
+		return this._readFromSelections();
+	}
+	public onFlushed(e: viewEvents.ViewFlushedEvent): boolean {
 		return true;
 	}
-	public onModelLinesInserted(e:EditorCommon.IViewLinesInsertedEvent): boolean {
+	public onLinesDeleted(e: viewEvents.ViewLinesDeletedEvent): boolean {
 		return true;
 	}
-	public onCursorPositionChanged(e:EditorCommon.IViewCursorPositionChangedEvent): boolean {
-		var hasChanged = false;
-		if (this._primaryCursorIsInEditableRange !== e.isInEditableRange) {
-			this._primaryCursorIsInEditableRange = e.isInEditableRange;
-			hasChanged = true;
-		}
-		if (this._primaryCursorLineNumber !== e.position.lineNumber) {
-			this._primaryCursorLineNumber = e.position.lineNumber;
-			hasChanged = true;
-		}
-		return hasChanged;
-	}
-	public onCursorSelectionChanged(e:EditorCommon.IViewCursorSelectionChangedEvent): boolean {
-		var isEmpty = e.selection.isEmpty();
-		if (this._selectionIsEmpty !== isEmpty) {
-			this._selectionIsEmpty = isEmpty;
-			return true;
-		}
-		return false;
-	}
-	public onConfigurationChanged(e:EditorCommon.IConfigurationChangedEvent): boolean {
+	public onLinesInserted(e: viewEvents.ViewLinesInsertedEvent): boolean {
 		return true;
 	}
-	public onLayoutChanged(layoutInfo:EditorCommon.IEditorLayoutInfo): boolean {
-		return true;
+	public onScrollChanged(e: viewEvents.ViewScrollChangedEvent): boolean {
+		return e.scrollWidthChanged || e.scrollTopChanged;
 	}
-	public onScrollChanged(e:EditorCommon.IScrollEvent): boolean {
+	public onZonesChanged(e: viewEvents.ViewZonesChangedEvent): boolean {
 		return true;
-	}
-	public onZonesChanged(): boolean {
-		return true;
-	}
-	public onScrollWidthChanged(scrollWidth:number): boolean {
-		if (this._scrollWidth !== scrollWidth) {
-			this._scrollWidth = scrollWidth;
-			return true;
-		}
-		return false;
 	}
 	// --- end event handlers
 
-	public shouldCallRender2(ctx:EditorBrowser.IRenderingContext): boolean {
-		if (!this.shouldRender) {
-			return false;
+	public prepareRender(ctx: RenderingContext): void {
+		if (!this._shouldRenderThis()) {
+			this._renderData = null;
+			return;
 		}
-		this.shouldRender = false;
-		this._scrollWidth = ctx.scrollWidth;
-		return true;
-	}
-
-	public render2(lineNumber:number): string[] {
-		if (lineNumber === this._primaryCursorLineNumber) {
-			if (this._shouldShowCurrentLine()) {
-				return [
-					'<div class="current-line" style="width:',
-					String(this._scrollWidth),
-					'px; height:',
-					String(this._context.configuration.editor.lineHeight),
-					'px;"></div>'
-				];
+		const renderedLine = this._renderOne(ctx);
+		const visibleStartLineNumber = ctx.visibleRange.startLineNumber;
+		const visibleEndLineNumber = ctx.visibleRange.endLineNumber;
+		const len = this._cursorLineNumbers.length;
+		let index = 0;
+		const renderData: string[] = [];
+		for (let lineNumber = visibleStartLineNumber; lineNumber <= visibleEndLineNumber; lineNumber++) {
+			const lineIndex = lineNumber - visibleStartLineNumber;
+			while (index < len && this._cursorLineNumbers[index] < lineNumber) {
+				index++;
+			}
+			if (index < len && this._cursorLineNumbers[index] === lineNumber) {
+				renderData[lineIndex] = renderedLine;
 			} else {
-				return null;
+				renderData[lineIndex] = '';
 			}
 		}
-		return null;
+		this._renderData = renderData;
 	}
 
-	private _shouldShowCurrentLine(): boolean {
-		return this._selectionIsEmpty && this._primaryCursorIsInEditableRange && !this._context.configuration.editor.readOnly;
+	public render(startLineNumber: number, lineNumber: number): string {
+		if (!this._renderData) {
+			return '';
+		}
+		const lineIndex = lineNumber - startLineNumber;
+		if (lineIndex >= this._renderData.length) {
+			return '';
+		}
+		return this._renderData[lineIndex];
+	}
+
+	protected abstract _shouldRenderThis(): boolean;
+	protected abstract _shouldRenderOther(): boolean;
+	protected abstract _renderOne(ctx: RenderingContext): string;
+}
+
+export class CurrentLineHighlightOverlay extends AbstractLineHighlightOverlay {
+
+	protected _renderOne(ctx: RenderingContext): string {
+		const className = 'current-line' + (this._shouldRenderOther() ? ' current-line-both' : '');
+		return `<div class="${className}" style="width:${Math.max(ctx.scrollWidth, this._contentWidth)}px; height:${this._lineHeight}px;"></div>`;
+	}
+	protected _shouldRenderThis(): boolean {
+		return (
+			(this._renderLineHighlight === 'line' || this._renderLineHighlight === 'all')
+			&& this._selectionIsEmpty
+		);
+	}
+	protected _shouldRenderOther(): boolean {
+		return (
+			(this._renderLineHighlight === 'gutter' || this._renderLineHighlight === 'all')
+		);
 	}
 }
+
+export class CurrentLineMarginHighlightOverlay extends AbstractLineHighlightOverlay {
+	protected _renderOne(ctx: RenderingContext): string {
+		const className = 'current-line current-line-margin' + (this._shouldRenderOther() ? ' current-line-margin-both' : '');
+		return `<div class="${className}" style="width:${this._contentLeft}px; height:${this._lineHeight}px;"></div>`;
+	}
+	protected _shouldRenderThis(): boolean {
+		return (
+			(this._renderLineHighlight === 'gutter' || this._renderLineHighlight === 'all')
+		);
+	}
+	protected _shouldRenderOther(): boolean {
+		return (
+			(this._renderLineHighlight === 'line' || this._renderLineHighlight === 'all')
+			&& this._selectionIsEmpty
+		);
+	}
+}
+
+registerThemingParticipant((theme, collector) => {
+	isRenderedUsingBorder = false;
+	const lineHighlight = theme.getColor(editorLineHighlight);
+	if (lineHighlight) {
+		collector.addRule(`.monaco-editor .view-overlays .current-line { background-color: ${lineHighlight}; }`);
+		collector.addRule(`.monaco-editor .margin-view-overlays .current-line-margin { background-color: ${lineHighlight}; border: none; }`);
+	}
+	if (!lineHighlight || lineHighlight.isTransparent() || theme.defines(editorLineHighlightBorder)) {
+		const lineHighlightBorder = theme.getColor(editorLineHighlightBorder);
+		if (lineHighlightBorder) {
+			isRenderedUsingBorder = true;
+			collector.addRule(`.monaco-editor .view-overlays .current-line { border: 2px solid ${lineHighlightBorder}; }`);
+			collector.addRule(`.monaco-editor .margin-view-overlays .current-line-margin { border: 2px solid ${lineHighlightBorder}; }`);
+			if (theme.type === 'hc') {
+				collector.addRule(`.monaco-editor .view-overlays .current-line { border-width: 1px; }`);
+				collector.addRule(`.monaco-editor .margin-view-overlays .current-line-margin { border-width: 1px; }`);
+			}
+		}
+	}
+});

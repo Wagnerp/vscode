@@ -2,132 +2,238 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
-import {TPromise} from 'vs/base/common/winjs.base';
-import URI from 'vs/base/common/uri';
-import {createDecorator, ServiceIdentifier} from 'vs/platform/instantiation/common/instantiation';
-import {IEditorService, IEditor, IEditorInput, IEditorOptions, Position, IResourceInput, ITextInput, IEditorModel, ITextEditorModel} from 'vs/platform/editor/common/editor';
+import { createDecorator, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
+import { IResourceInput, IEditorOptions, ITextEditorOptions } from 'vs/platform/editor/common/editor';
+import { IEditorInput, IEditor, GroupIdentifier, IEditorInputWithOptions, IUntitledTextResourceInput, IResourceDiffInput, IResourceSideBySideInput, ITextEditor, ITextDiffEditor, ITextSideBySideEditor, IEditorIdentifier, ISaveOptions, IRevertOptions, EditorsOrder } from 'vs/workbench/common/editor';
+import { Event } from 'vs/base/common/event';
+import { IEditor as ICodeEditor, IDiffEditor } from 'vs/editor/common/editorCommon';
+import { IEditorGroup, IEditorReplacement } from 'vs/workbench/services/editor/common/editorGroupsService';
+import { IDisposable } from 'vs/base/common/lifecycle';
 
-export interface IFileInput extends ITextInput {
+export const IEditorService = createDecorator<IEditorService>('editorService');
 
-	/**
-	 * The file resource of the file.
-	 */
-	resource: URI;
+export type IResourceEditor = IResourceInput | IUntitledTextResourceInput | IResourceDiffInput | IResourceSideBySideInput;
+
+export interface IResourceEditorReplacement {
+	editor: IResourceEditor;
+	replacement: IResourceEditor;
 }
 
-export enum EditorArrangement {
-	MINIMIZE_OTHERS,
-	EVEN_WIDTH
+export const ACTIVE_GROUP = -1;
+export type ACTIVE_GROUP_TYPE = typeof ACTIVE_GROUP;
+
+export const SIDE_GROUP = -2;
+export type SIDE_GROUP_TYPE = typeof SIDE_GROUP;
+
+export interface IOpenEditorOverrideHandler {
+	(editor: IEditorInput, options: IEditorOptions | ITextEditorOptions | undefined, group: IEditorGroup): IOpenEditorOverride | undefined;
 }
 
-export var IWorkbenchEditorService = createDecorator<IWorkbenchEditorService>('editorService');
-
-/**
- * The editor service allows to open editors and work on the active
- * editor input and models.
- */
-export interface IWorkbenchEditorService extends IEditorService {
-	serviceId : ServiceIdentifier<any>;
+export interface IOpenEditorOverride {
 
 	/**
-	 * Returns the currently active editor or null if none.
+	 * If defined, will prevent the opening of an editor and replace the resulting
+	 * promise with the provided promise for the openEditor() call.
 	 */
-	getActiveEditor(): IEditor;
+	override?: Promise<IEditor | undefined>;
+}
+
+export interface IVisibleEditor extends IEditor {
+	input: IEditorInput;
+	group: IEditorGroup;
+}
+
+export interface ISaveEditorsOptions extends ISaveOptions {
 
 	/**
-	 * Returns the currently active editor input or null if none.
+	 * If true, will ask for a location of the editor to save to.
 	 */
-	getActiveEditorInput(): IEditorInput;
+	saveAs?: boolean;
+}
+
+export interface IBaseSaveRevertAllEditorOptions {
 
 	/**
-	 * Returns an array of visible editors.
+	 * Wether to include untitled editors as well.
 	 */
-	getVisibleEditors(): IEditor[];
+	includeUntitled?: boolean;
+}
+
+export interface ISaveAllEditorsOptions extends ISaveEditorsOptions, IBaseSaveRevertAllEditorOptions { }
+
+export interface IRevertAllEditorsOptions extends IRevertOptions, IBaseSaveRevertAllEditorOptions { }
+
+export interface IEditorService {
+
+	_serviceBrand: undefined;
 
 	/**
-	 * Returns iff the provided input is currently visible.
+	 * Emitted when the currently active editor changes.
 	 *
-	 * @param includeDiff iff set to true, will also consider diff editors to find out if the provided
-	 * input is opened either on the left or right hand side of the diff editor.
+	 * @see `IEditorService.activeEditor`
 	 */
-	isVisible(input: IEditorInput, includeDiff: boolean): boolean;
+	readonly onDidActiveEditorChange: Event<void>;
 
 	/**
-	 * Opens an Editor on the given input with the provided options at the given position. If the input paramater
-	 * is null, will cause the currently opened editor at the position to close. If sideBySide parameter is provided,
-	 * causes the editor service to decide in what position to open the input.
+	 * Emitted when any of the current visible editors changes.
+	 *
+	 * @see `IEditorService.visibleEditors`
 	 */
-	openEditor(input: IEditorInput, options?: IEditorOptions, position?: Position): TPromise<IEditor>;
-	openEditor(input: IEditorInput, options?: IEditorOptions, sideBySide?: boolean): TPromise<IEditor>;
+	readonly onDidVisibleEditorsChange: Event<void>;
 
 	/**
-	 * Specific overload to open an instance of IResourceInput.
+	 * The currently active editor or `undefined` if none. An editor is active when it is
+	 * located in the currently active editor group. It will be `undefined` if the active
+	 * editor group has no editors open.
 	 */
-	openEditor(input: IResourceInput, position?: Position): TPromise<IEditor>;
-	openEditor(input: IResourceInput, sideBySide?: boolean): TPromise<IEditor>;
+	readonly activeEditor: IEditorInput | undefined;
 
 	/**
-	 * Specific overload to open an instance of IFileInput.
+	 * The currently active editor control or `undefined` if none. The editor control is
+	 * the workbench container for editors of any kind.
+	 *
+	 * @see `IEditorService.activeEditor`
 	 */
-	openEditor(input: IFileInput, position?: Position): TPromise<IEditor>;
-	openEditor(input: IFileInput, sideBySide?: boolean): TPromise<IEditor>;
+	readonly activeControl: IVisibleEditor | undefined;
 
 	/**
-	 * Opens the set of inputs replacing any other editor that is currently open. Use #openEditor() instead to open
-	 * a single editor.
+	 * The currently active text editor widget or `undefined` if there is currently no active
+	 * editor or the active editor widget is neither a text nor a diff editor.
+	 *
+	 * @see `IEditorService.activeEditor`
 	 */
-	setEditors(inputs: IEditorInput[]): TPromise<IEditor[]>;
-	setEditors(inputs: IResourceInput[]): TPromise<IEditor[]>;
-	setEditors(inputs: IFileInput[]): TPromise<IEditor[]>;
+	readonly activeTextEditorWidget: ICodeEditor | IDiffEditor | undefined;
 
 	/**
-	 * Closes the editor at the provided position. If position is not provided, the current active editor is closed.
+	 * All editors that are currently visible. An editor is visible when it is opened in an
+	 * editor group and active in that group. Multiple editor groups can be opened at the same time.
 	 */
-	closeEditor(editor?: IEditor): TPromise<IEditor>;
-	closeEditor(position?: Position): TPromise<IEditor>;
+	readonly visibleEditors: ReadonlyArray<IEditorInput>;
 
 	/**
-	 * Closes all editors or only others that are not active.
+	 * All editor controls that are currently visible across all editor groups.
 	 */
-	closeEditors(othersOnly?: boolean): TPromise<void>;
+	readonly visibleControls: ReadonlyArray<IVisibleEditor>;
 
 	/**
-	 * Focus the editor at the provided position. If position is not provided, the current active editor is focussed.
+	 * All text editor widgets that are currently visible across all editor groups. A text editor
+	 * widget is either a text or a diff editor.
 	 */
-	focusEditor(editor?: IEditor): TPromise<IEditor>;
-	focusEditor(position?: Position): TPromise<IEditor>;
+	readonly visibleTextEditorWidgets: ReadonlyArray<ICodeEditor>;
 
 	/**
-	 * Allows to move the editor at position 1 to position 2.
+	 * All editors that are opened across all editor groups in sequential order
+	 * of appearance.
+	 *
+	 * This includes active as well as inactive editors in each editor group.
 	 */
-	moveEditor(from: Position, to: Position): void;
+	readonly editors: ReadonlyArray<IEditorInput>;
 
 	/**
-	 * Allows to arrange editors according to the EditorArrangement enumeration.
+	 * The total number of editors that are opened either inactive or active.
 	 */
-	arrangeEditors(arrangement: EditorArrangement): void;
+	readonly count: number;
 
 	/**
-	 * Resolves an input to its model representation. The optional parameter refresh allows to specify
-	 * if a cached model should be returned (false) or a new version (true). The default is returning a
-	 * cached version.
+	 * All editors that are opened across all editor groups with their group
+	 * identifier.
+	 *
+	 * @param order the order of the editors to use
 	 */
-	resolveEditorModel(input: IEditorInput, refresh?: boolean): TPromise<IEditorModel>;
+	getEditors(order: EditorsOrder): ReadonlyArray<IEditorIdentifier>;
 
 	/**
-	 * Specific overload to resolve a IResourceInput to an editor model with a text representation.
+	 * Open an editor in an editor group.
+	 *
+	 * @param editor the editor to open
+	 * @param options the options to use for the editor
+	 * @param group the target group. If unspecified, the editor will open in the currently
+	 * active group. Use `SIDE_GROUP_TYPE` to open the editor in a new editor group to the side
+	 * of the currently active group.
+	 *
+	 * @returns the editor that opened or `undefined` if the operation failed or the editor was not
+	 * opened to be active.
 	 */
-	resolveEditorModel(input: IResourceInput, refresh?: boolean): TPromise<ITextEditorModel>;
+	openEditor(editor: IEditorInput, options?: IEditorOptions | ITextEditorOptions, group?: IEditorGroup | GroupIdentifier | SIDE_GROUP_TYPE | ACTIVE_GROUP_TYPE): Promise<IEditor | undefined>;
+	openEditor(editor: IResourceInput | IUntitledTextResourceInput, group?: IEditorGroup | GroupIdentifier | SIDE_GROUP_TYPE | ACTIVE_GROUP_TYPE): Promise<ITextEditor | undefined>;
+	openEditor(editor: IResourceDiffInput, group?: IEditorGroup | GroupIdentifier | SIDE_GROUP_TYPE | ACTIVE_GROUP_TYPE): Promise<ITextDiffEditor | undefined>;
+	openEditor(editor: IResourceSideBySideInput, group?: IEditorGroup | GroupIdentifier | SIDE_GROUP_TYPE | ACTIVE_GROUP_TYPE): Promise<ITextSideBySideEditor | undefined>;
 
 	/**
-	 * Specific overload to resolve a IFileInput to an editor model with a text representation.
+	 * Open editors in an editor group.
+	 *
+	 * @param editors the editors to open with associated options
+	 * @param group the target group. If unspecified, the editor will open in the currently
+	 * active group. Use `SIDE_GROUP_TYPE` to open the editor in a new editor group to the side
+	 * of the currently active group.
+	 *
+	 * @returns the editors that opened. The array can be empty or have less elements for editors
+	 * that failed to open or were instructed to open as inactive.
 	 */
-	resolveEditorModel(input: IFileInput, refresh?: boolean): TPromise<ITextEditorModel>;
+	openEditors(editors: IEditorInputWithOptions[], group?: IEditorGroup | GroupIdentifier | SIDE_GROUP_TYPE | ACTIVE_GROUP_TYPE): Promise<ReadonlyArray<IEditor>>;
+	openEditors(editors: IResourceEditor[], group?: IEditorGroup | GroupIdentifier | SIDE_GROUP_TYPE | ACTIVE_GROUP_TYPE): Promise<ReadonlyArray<IEditor>>;
 
 	/**
-	 * Allows to resolve an untyped input to a workbench typed instanceof editor input
+	 * Replaces editors in an editor group with the provided replacement.
+	 *
+	 * @param editors the editors to replace
+	 *
+	 * @returns a promise that is resolved when the replaced active
+	 * editor (if any) has finished loading.
 	 */
-	inputToType(input: IResourceInput): TPromise<IEditorInput>;
+	replaceEditors(editors: IResourceEditorReplacement[], group: IEditorGroup | GroupIdentifier): Promise<void>;
+	replaceEditors(editors: IEditorReplacement[], group: IEditorGroup | GroupIdentifier): Promise<void>;
+
+	/**
+	 * Find out if the provided editor (or resource of an editor) is opened in any or
+	 * a specific editor group.
+	 *
+	 * Note: An editor can be opened but not actively visible.
+	 */
+	isOpen(editor: IEditorInput | IResourceInput | IUntitledTextResourceInput): boolean;
+
+	/**
+	 * Get the actual opened editor input in any or a specific editor group based on the resource.
+	 *
+	 * Note: An editor can be opened but not actively visible.
+	 */
+	getOpened(editor: IResourceInput | IUntitledTextResourceInput): IEditorInput | undefined;
+
+	/**
+	 * Allows to override the opening of editors by installing a handler that will
+	 * be called each time an editor is about to open allowing to override the
+	 * operation to open a different editor.
+	 */
+	overrideOpenEditor(handler: IOpenEditorOverrideHandler): IDisposable;
+
+	/**
+	 * Invoke a function in the context of the services of the active editor.
+	 */
+	invokeWithinEditorContext<T>(fn: (accessor: ServicesAccessor) => T): T;
+
+	/**
+	 * Converts a lightweight input to a workbench editor input.
+	 */
+	createInput(input: IResourceEditor): IEditorInput;
+
+	/**
+	 * Save the provided list of editors.
+	 */
+	save(editors: IEditorIdentifier | IEditorIdentifier[], options?: ISaveEditorsOptions): Promise<boolean>;
+
+	/**
+	 * Save all editors.
+	 */
+	saveAll(options?: ISaveAllEditorsOptions): Promise<boolean>;
+
+	/**
+	 * Reverts the provided list of editors.
+	 */
+	revert(editors: IEditorIdentifier | IEditorIdentifier[], options?: IRevertOptions): Promise<boolean>;
+
+	/**
+	 * Reverts all editors.
+	 */
+	revertAll(options?: IRevertAllEditorsOptions): Promise<boolean>;
 }

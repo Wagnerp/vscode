@@ -3,22 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-var es = require('event-stream');
-
-function handleDeletions() {
-	return es.mapSync(function (f) {
-		if (!f.contents) {
-			f.contents = new Buffer('');
-			f.stat = { mtime: new Date() };
-		}
-
-		return f;
-	});
-}
-
-var watch = process.platform === 'win32' ? require('./watch-win32') : require('gulp-watch');
+const watch = process.platform === 'win32' ? require('./watch-win32') : require('vscode-gulp-watch');
 
 module.exports = function () {
-	return watch.apply(null, arguments)
-		.pipe(handleDeletions());
+	return watch.apply(null, arguments);
 };
